@@ -7,6 +7,8 @@ export type AiFeedResult = {
   meal: string;
   reaction: string;
   tasteMatch: number;
+  /** True when a Focus Lens was consumed, as reported by the contract. */
+  lensApplied: boolean;
   xpMultiplier: number;
   xpGained: number;
   tokens: number | null;

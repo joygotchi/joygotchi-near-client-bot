@@ -71,6 +71,114 @@ impl PetAttrs {
     }
 }
 
+/// Credit-item ids. The game contract's own $JOY shop uses 1-4, so these start
+/// at 101 to keep the two namespaces apart in events and logs.
+pub const ITEM_TONIC: u16 = 101;
+pub const ITEM_WARD: u16 = 102;
+pub const ITEM_LENS: u16 = 103;
+pub const ITEM_CHARM: u16 = 104;
+
+pub const WARD_SECONDS: u64 = 24 * 60 * 60;
+pub const WOUND_SECONDS: u64 = 6 * 60 * 60;
+pub const LENS_FEEDS: u8 = 10;
+
+/// How long between mining claims.
+pub const MINING_COOLDOWN_SECONDS: u64 = 6 * 60 * 60;
+
+/// Every item that can drop, in ascending order of value.
+pub const DROPPABLE_ITEMS: [u16; 4] = [ITEM_TONIC, ITEM_CHARM, ITEM_LENS, ITEM_WARD];
+
+/// Floor drop chance, in basis points, before pet weight is counted.
+pub const DROP_BASE_BPS: u32 = 200;
+/// Ceiling, so a maxed pet is lucky rather than a printing press.
+pub const DROP_MAX_BPS: u32 = 2_500;
+/// Weight needed for one extra basis point of drop chance.
+///
+/// One, so the curve actually spans the weights pets reach: a fresh common is
+/// weight 100 and a maxed legendary 2,240, giving 3% and 24.4%. At `20` the
+/// whole range fit between 2.05% and 3.1% and the ceiling was unreachable —
+/// "stronger pets find more" was true only on paper.
+pub const DROP_WEIGHT_PER_BPS: u128 = 1;
+
+/// A stronger pet finds better things, not just more of them.
+///
+/// Returns the chance in basis points and the highest item tier the pet can
+/// roll, as an index into `DROPPABLE_ITEMS`.
+pub fn drop_odds(weight: u128) -> (u32, usize) {
+    if weight == 0 {
+        return (0, 0);
+    }
+
+    let bonus = (weight / DROP_WEIGHT_PER_BPS) as u32;
+    let chance = (DROP_BASE_BPS + bonus).min(DROP_MAX_BPS);
+
+    // Tiers unlock with weight: 400 is a fresh legendary, 2240 a maxed one.
+    let tier = match weight {
+        0..=199 => 0,
+        200..=599 => 1,
+        600..=1_399 => 2,
+        _ => 3,
+    };
+
+    (chance, tier)
+}
+
+/// An item offered for sale between players.
+#[near(serializers = [json, borsh])]
+#[derive(Clone, Debug)]
+pub struct Listing {
+    pub id: U64,
+    pub seller_id: AccountId,
+    pub item_id: u16,
+    pub quantity: u32,
+    /// Price of one item, in micro-credits.
+    pub price_each: U128,
+    pub created_at: U64,
+}
+
+/// Per-pet state that credit items and battles write.
+///
+/// Deliberately kept out of the weight calculation. The credit accumulator is
+/// exact, and a weight that changes on a deadline would need the pool updated
+/// at a moment when nothing is calling it — so every effect here gates
+/// *gameplay* instead of altering the stream.
+#[derive(BorshSerialize, BorshDeserialize, Default, Clone)]
+#[borsh(crate = "near_sdk::borsh")]
+pub struct PetState {
+    /// Cannot battle until this timestamp.
+    pub wounded_until: u64,
+    /// Cannot be attacked until this timestamp.
+    pub shielded_until: u64,
+    /// AI feeds still covered by a Focus Lens.
+    pub lens_feeds_left: u8,
+    /// Keeps the pet's star on its next loss.
+    pub star_guard: bool,
+}
+
+#[near(serializers = [json])]
+pub struct PetStateView {
+    pub pet_id: u64,
+    pub wounded_until: U64,
+    pub shielded_until: U64,
+    pub lens_feeds_left: u8,
+    pub star_guard: bool,
+    pub staked: bool,
+    /// False while staked, warded or wounded.
+    pub attackable: bool,
+}
+
+#[near(serializers = [json])]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct BattleOutcome {
+    /// Credits moved from the loser to the winner.
+    pub transferred: U128,
+    /// Credits taken as rake.
+    pub rake: U128,
+    /// True when a Star Charm absorbed the loss — the game contract should
+    /// leave the pet's star alone.
+    pub star_protected: bool,
+}
+
 #[near(serializers = [json, borsh])]
 #[derive(Clone, Debug)]
 pub struct StakedPet {
@@ -95,6 +203,9 @@ pub struct Account {
     pub auto_feed_budget: u128,
     pub last_claim_at: u64,
     pub last_faucet_at: u64,
+    pub last_mining_at: u64,
+    /// Items dropped or bought and not yet used, keyed by item id.
+    pub items: Vec<(u16, u32)>,
     pub staked: Vec<u64>,
 }
 
@@ -108,6 +219,8 @@ pub struct AccountView {
     pub pending_credits: U128,
     pub auto_feed_budget: U128,
     pub last_claim_at: U64,
+    /// Unused items, as (item_id, count).
+    pub items: Vec<(u16, u32)>,
 }
 
 /// What `get_pool` returns.
@@ -125,12 +238,4 @@ pub struct PoolView {
     pub sale_reserve: U128,
     pub updated_at: U64,
     pub paused: bool,
-}
-
-/// Payload of `ft_transfer_call` into this contract. $JOY only ever buys
-/// credits — credits never convert back, so there is nothing else to accept.
-#[derive(near_sdk::serde::Deserialize)]
-#[serde(crate = "near_sdk::serde", tag = "action", rename_all = "snake_case")]
-pub enum FtAction {
-    BuyCredits,
 }

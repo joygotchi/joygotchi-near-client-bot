@@ -2,7 +2,8 @@ import { error, json } from '@sveltejs/kit';
 import { NEAR_AI_API_KEY, NEAR_AI_BASE_URL, NEAR_AI_MODEL } from '$app/env/private';
 import type { RequestHandler } from './$types';
 import { buildTask, extractJson, type PetContext } from '#lib/ai/prompts';
-import { BASE_FEED_XP, SINKS, type CreditAction } from '#lib/economy/params';
+import { feedXp, LENS_BONUS, SINKS, type CreditAction } from '#lib/economy/params';
+import { ReplayGuardUnavailableError } from '#lib/server/receipt-store';
 import { ReceiptError, verifySpendReceipt } from '#lib/server/verify-tx';
 
 const AI_ACTIONS: CreditAction[] = ['ai_feed', 'train', 'craft_item', 'chat'];
@@ -35,14 +36,19 @@ export const POST: RequestHandler = async ({ request }) => {
   }
 
   // No inference happens until we have seen the on-chain payment.
+  let lensApplied = false;
   try {
-    await verifySpendReceipt({
+    const receipt = await verifySpendReceipt({
       txHash: body.txHash,
       accountId: body.accountId,
       action: body.action
     });
+    lensApplied = receipt.lensApplied;
   } catch (err) {
     if (err instanceof ReceiptError) error(402, err.message);
+    // Refusing is the point: a guard that cannot deduplicate receipts would let
+    // one payment buy unlimited inference on this server's NEAR AI key.
+    if (err instanceof ReplayGuardUnavailableError) error(503, err.message);
     throw err;
   }
 
@@ -92,15 +98,17 @@ export const POST: RequestHandler = async ({ request }) => {
 
   if (body.action === 'ai_feed') {
     const match = Math.min(1, Math.max(0, Number(parsed.taste_match) || 0));
-    // 1.0x for a miss, up to 1.8x for a perfect match.
-    const multiplier = 1 + match * 0.8;
+    // 1.0x for a miss, up to 1.8x for a perfect match, plus the lens bonus the
+    // contract says was consumed.
+    const multiplier = 1 + match * 0.8 + (lensApplied ? LENS_BONUS : 0);
     return json({
       ...result,
       meal: String(parsed.meal ?? 'mystery stew'),
       reaction: String(parsed.reaction ?? ''),
       tasteMatch: match,
+      lensApplied,
       xpMultiplier: Number(multiplier.toFixed(2)),
-      xpGained: Math.round(BASE_FEED_XP * multiplier)
+      xpGained: feedXp(match, lensApplied)
     });
   }
 

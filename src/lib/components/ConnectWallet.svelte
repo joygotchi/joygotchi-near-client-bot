@@ -1,7 +1,7 @@
 <script lang="ts">
   import { connectWallet, FEATURED_WALLETS, wallet } from '#lib/near/wallet.svelte';
   import { refreshPlayer } from '#lib/stores/player.svelte';
-  import { haptic } from '#lib/telegram';
+  import { haptic } from '#lib/platform';
 
   type Props = { compact?: boolean };
   let { compact = false }: Props = $props();

@@ -102,6 +102,27 @@ export async function ftTransferCall(
   );
 }
 
+/**
+ * Sign several transactions at once, each to a different contract.
+ *
+ * The wallet shows them together and they are signed in one approval, but they
+ * are separate transactions: a later one can land even if an earlier one
+ * fails, so only use this where that is acceptable.
+ */
+export async function callAcrossContracts(
+  transactions: Array<{ receiverId: string; calls: FunctionCall[] }>
+): Promise<TxOutcome[]> {
+  const active = await getActiveWallet();
+  if (!active || !wallet.accountId) throw new WalletNotConnectedError();
+
+  return active.signAndSendTransactions({
+    transactions: transactions.map((tx) => ({
+      receiverId: tx.receiverId,
+      actions: tx.calls.map(toAction)
+    }))
+  });
+}
+
 /** NEP-141 `storage_deposit`, needed once before an account can hold a token. */
 export async function storageDeposit(
   tokenContract: string,

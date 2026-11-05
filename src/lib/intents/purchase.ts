@@ -1,6 +1,6 @@
 import type { QuoteResponse } from './types';
 
-export type PurchasePurpose = 'mint_pet' | 'buy_joy';
+export type PurchasePurpose = 'mint_pet' | 'buy_credits';
 
 /** What the browser sends to `POST /api/intents/quote`. */
 export type PurchaseQuoteRequest = {
@@ -9,9 +9,9 @@ export type PurchaseQuoteRequest = {
   originAsset: string;
   /** Address on the origin chain that receives a refund if the swap fails. */
   refundTo: string;
-  /** NEAR account that receives the pet / the $JOY. */
+  /** NEAR account that receives the pet or the credits. */
   accountId: string;
-  /** Number of pets, or number of $JOY packs. Defaults to 1. */
+  /** Number of pets. Ignored when buying credits. Defaults to 1. */
   quantity?: number;
   /** Pet species for `mint_pet`, e.g. `blackdragon`. */
   petCategory?: string;
@@ -40,7 +40,7 @@ export type MintRouterMsg = {
   quantity: number;
 };
 
-export type BuyJoyMsg = {
-  action: 'buy_joy';
+export type BuyCreditsMsg = {
+  action: 'buy_credits';
   account_id: string;
 };

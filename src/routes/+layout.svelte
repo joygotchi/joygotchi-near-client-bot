@@ -4,12 +4,10 @@
   import Toasts from '#lib/components/Toasts.svelte';
   import { initWallet, wallet } from '#lib/near/wallet.svelte';
   import { refreshPlayer } from '#lib/stores/player.svelte';
-  import { initTelegram } from '#lib/telegram';
 
   let { children }: { children: Snippet } = $props();
 
   $effect(() => {
-    initTelegram();
     void initWallet();
   });
 

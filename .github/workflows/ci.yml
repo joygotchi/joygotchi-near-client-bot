@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A new push to the same branch makes the previous run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    name: web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # pnpm first: setup-node's pnpm cache needs the binary to resolve the store.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Types, a11y and unused props. Runs `svelte-kit sync` itself.
+      - run: pnpm check
+
+      - run: pnpm build
+
+  contracts:
+    name: contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts
+
+      - name: Install cargo-near
+        # A prebuilt binary; building it from source costs about five minutes a
+        # run. Pinned, because `build.sh` requires >= 0.22 and the wasm-opt it
+        # bundles is the whole reason this job exists.
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            https://github.com/near/cargo-near/releases/download/cargo-near-v0.22.0/cargo-near-installer.sh \
+            | sh
+
+      - name: Tests
+        working-directory: contracts
+        run: cargo test
+
+      - name: Clippy
+        working-directory: contracts
+        run: cargo clippy --all-targets -- -D warnings
+
+      # The check this job is really here for.
+      #
+      # `cargo near build` runs a `wasm-opt -O` post-step that its own help
+      # calls "required for correctness of build on rustc >= 1.82". Without it
+      # every panic on-chain degrades to a bare `unreachable` trap and the
+      # message is lost — plain `cargo build` compiles happily and ships a
+      # contract that swallows its own errors. That was issue #3, and it took a
+      # testnet deploy to notice.
+      - name: Build contracts
+        working-directory: contracts
+        run: ./build.sh

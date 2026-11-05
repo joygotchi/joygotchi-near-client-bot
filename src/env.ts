@@ -33,25 +33,20 @@ export const variables = defineEnvVars({
   },
   PUBLIC_NEAR_RPC_URL: {
     public: true,
-    schema: withDefault('https://rpc.mainnet.near.org'),
-    description: 'JSON-RPC endpoint used for view calls.'
+    schema: optional(),
+    description:
+      'JSON-RPC endpoint for view calls. Leave empty to use FastNEAR, picked by network. ' +
+      'It must send CORS headers: the browser reads contract state directly, and ' +
+      'rpc.mainnet.near.org refuses cross-origin requests.'
   },
 
   // ── Public: contracts ───────────────────────────────────────────────────────
   PUBLIC_CONTRACT_GAME: {
     public: true,
-    schema: withDefault('game.joyv1.near'),
-    description: 'Pet / game contract (create_pet, attack, buy_item, …).'
-  },
-  PUBLIC_CONTRACT_FT: {
-    public: true,
-    schema: withDefault('faucet.joyv1.near'),
-    description: 'Legacy faucet contract that hands out JOY (get_joychi).'
-  },
-  PUBLIC_CONTRACT_JOY: {
-    public: true,
-    schema: withDefault('joy.joyv1.near'),
-    description: '$JOY NEP-141 token contract.'
+    schema: withDefault('game-v2.joyv1.near'),
+    description:
+      'Pet contract — contracts/game. The original game.joyv1.near is not NEP-171 and ' +
+      'has none of the methods pet-stake and mint-router call.'
   },
   PUBLIC_CONTRACT_STAKE: {
     public: true,
@@ -72,18 +67,6 @@ export const variables = defineEnvVars({
     public: true,
     schema: decimal('2'),
     description: 'Price of one pet, in wNEAR (human units).'
-  },
-
-  // ── Public: Telegram ────────────────────────────────────────────────────────
-  PUBLIC_TG_BOT_ID: {
-    public: true,
-    schema: withDefault('joygotchi_bot/game'),
-    description: 'Telegram Mini App id, used by the in-Telegram HOT wallet flow.'
-  },
-  PUBLIC_TG_WALLET_ID: {
-    public: true,
-    schema: withDefault('herewalletbot/app'),
-    description: 'Telegram wallet app id for HOT wallet.'
   },
 
   // ── Private: NEAR Intents 1Click ────────────────────────────────────────────
@@ -108,6 +91,26 @@ export const variables = defineEnvVars({
   ONECLICK_FEE_RECIPIENT: {
     schema: optional(),
     description: 'Intents account that receives ONECLICK_FEE_BPS. Required if the fee is > 0.'
+  },
+
+  // ── Private: replay guard storage ───────────────────────────────────────────
+  KV_REST_API_URL: {
+    schema: optional(),
+    description:
+      'Upstash / Vercel KV REST endpoint. Holds one-shot claims on AI payment ' +
+      'receipts, which is what makes "one payment, one inference" hold across ' +
+      'serverless instances. Vercel KV sets this automatically.'
+  },
+  KV_REST_API_TOKEN: {
+    schema: optional(),
+    description: 'Token for KV_REST_API_URL. Server-only.'
+  },
+  ALLOW_INSECURE_REPLAY_GUARD: {
+    schema: withDefault('false'),
+    description:
+      'Set to "true" to run in production without KV. One payment can then buy ' +
+      'more than one inference, because receipts are only deduplicated per ' +
+      'instance. Off by default, and the AI endpoint refuses to run instead.'
   },
 
   // ── Private: NEAR AI Cloud ──────────────────────────────────────────────────
