@@ -3,13 +3,17 @@
   import Footer from '#lib/components/Footer.svelte';
   import Header from '#lib/components/Header.svelte';
   import {
-    FAUCET_DAILY_CREDITS,
+    BATTLE_WAGER_CREDITS,
+    CREDIT_ITEM_LIST,
+    FAUCET_GRANT_CREDITS,
     SINKS,
+    WOUND_HOURS,
     formatCredits,
     petWeight,
     type Rarity
   } from '#lib/economy/params';
   import {
+    activeUntil,
     claimCredits,
     claimFaucetCredits,
     setAutoFeedBudget,
@@ -18,7 +22,14 @@
   } from '#lib/economy/stake';
   import { petImage, type Pet } from '#lib/game/pets';
   import { wallet } from '#lib/near/wallet.svelte';
-  import { creditsPerDay, isStaked, liveCredits, player, refreshPlayer } from '#lib/stores/player.svelte';
+  import {
+    creditsPerDay,
+    isStaked,
+    liveCredits,
+    petState,
+    player,
+    refreshPlayer
+  } from '#lib/stores/player.svelte';
   import { withToast } from '#lib/stores/toast.svelte';
   import { haptic } from '#lib/telegram';
 
@@ -72,7 +83,7 @@
   }
 
   async function faucet() {
-    await withToast('Claiming…', claimFaucetCredits, () => `+${FAUCET_DAILY_CREDITS} credit`);
+    await withToast('Claiming…', claimFaucetCredits, () => `+${FAUCET_GRANT_CREDITS} credit`);
     await refreshPlayer(true);
   }
 
@@ -126,7 +137,7 @@
             onclick={faucet}
             class="h-10 flex-1 rounded-lg border-2 border-[#a9c6e4]"
           >
-            <small class="font-semibold text-[#a9c6e4]">DAILY FREE</small>
+            <small class="font-semibold text-[#a9c6e4]">FREE GRANT</small>
           </button>
         </div>
 
@@ -161,6 +172,7 @@
 
         {#each player.pets as pet (pet.pet_id)}
           {@const staked = isStaked(pet.pet_id)}
+          {@const info = petState(pet.pet_id)}
           <div
             class="flex flex-row items-center justify-between rounded-lg border-2 px-2 py-2 {staked
               ? 'border-[#f48f59] bg-[#f48f59]/10'
@@ -173,6 +185,28 @@
                 <small class="text-[0.6rem] text-[#00000088]">
                   LV {pet.level} · {pet.star}★ · weight {weightOf(pet)}
                 </small>
+                <div class="flex flex-row gap-1">
+                  {#if activeUntil(info.wounded_until, now)}
+                    <small class="rounded bg-[#f8d7da] px-1 text-[0.5rem] text-[#a3242c]">
+                      wounded
+                    </small>
+                  {/if}
+                  {#if activeUntil(info.shielded_until, now)}
+                    <small class="rounded bg-[#d4edda] px-1 text-[0.5rem] text-[#155724]">
+                      warded
+                    </small>
+                  {/if}
+                  {#if info.lens_feeds_left > 0}
+                    <small class="rounded bg-[#a9c6e4] px-1 text-[0.5rem] text-[#2d3c53]">
+                      lens {info.lens_feeds_left}
+                    </small>
+                  {/if}
+                  {#if info.star_guard}
+                    <small class="rounded bg-[#a9c6e4] px-1 text-[0.5rem] text-[#2d3c53]">
+                      charm
+                    </small>
+                  {/if}
+                </div>
               </div>
             </div>
             <button
@@ -223,6 +257,42 @@
         >
           <small class="font-semibold text-white">SAVE</small>
         </button>
+      </section>
+
+      <!-- Items -->
+      <section class="flex flex-col gap-2 rounded-lg border-2 border-[#304053] p-3">
+        <span class="text-black">Credit items</span>
+        {#each CREDIT_ITEM_LIST as item (item.id)}
+          <div class="flex flex-row items-start justify-between gap-2 border-b border-[#304053]/20 pb-1">
+            <div class="flex min-w-0 flex-col">
+              <small class="text-black">{item.label}</small>
+              <small class="text-[0.6rem] text-[#00000088]">{item.description}</small>
+            </div>
+            <small class="shrink-0 text-black">{item.credits} ACR</small>
+          </div>
+        {/each}
+        <small class="text-[0.6rem] text-[#00000088]">
+          Buy them on the pet screen. A staked pet can never be attacked, so a Sentinel Ward only
+          matters once you take it out of the lab.
+        </small>
+      </section>
+
+      <!-- Battle -->
+      <section class="flex flex-col gap-2 rounded-lg border-2 border-[#304053] p-3">
+        <span class="text-black">Battle</span>
+        <div class="flex flex-row justify-between">
+          <small class="text-[#00000088]">Wager</small>
+          <small class="text-black">{BATTLE_WAGER_CREDITS} ACR → winner</small>
+        </div>
+        <div class="flex flex-row justify-between">
+          <small class="text-[#00000088]">Losing costs</small>
+          <small class="text-black">the wager + {WOUND_HOURS}h wounded</small>
+        </div>
+        <small class="text-[0.6rem] text-[#00000088]">
+          Pets never die from a fight. Credits are streamed by weight share, so killing another
+          staker's pet would raise the attacker's own income — death and a share-based stream
+          together would make griefing profitable.
+        </small>
       </section>
 
       <!-- Sinks -->

@@ -3,9 +3,10 @@
   import Header from '#lib/components/Header.svelte';
   import Modal from '#lib/components/Modal.svelte';
   import PetCarousel from '#lib/components/PetCarousel.svelte';
-  import { attack, attackBlockedReason, petImage } from '#lib/game/pets';
+  import { BATTLE_WAGER_CREDITS, WOUND_HOURS } from '#lib/economy/params';
+  import { attack, attackBlockedReason, petImage, petStatus } from '#lib/game/pets';
   import { wallet } from '#lib/near/wallet.svelte';
-  import { isStaked, player, refreshPlayer } from '#lib/stores/player.svelte';
+  import { isStaked, petState, player, refreshPlayer } from '#lib/stores/player.svelte';
   import { toastError, toastSuccess } from '#lib/stores/toast.svelte';
   import { haptic, notify } from '#lib/telegram';
 
@@ -14,17 +15,28 @@
   let picking = $state(false);
   let striking = $state(false);
 
+  let now = $state(Date.now());
+  $effect(() => {
+    const timer = setInterval(() => (now = Date.now()), 5000);
+    return () => clearInterval(timer);
+  });
+
   const mine = $derived(player.pets[mineIndex]);
   const target = $derived(player.opponents[targetIndex]);
-  const blocked = $derived(attackBlockedReason(mine, target));
   const staked = $derived(mine ? isStaked(mine.pet_id) : false);
+
+  const blocked = $derived(
+    attackBlockedReason(mine, target, {
+      nowMs: now,
+      mineStaked: staked,
+      // A staked, warded or wounded pet is off limits — the contract enforces
+      // this too, so attacking anyway would just burn gas.
+      targetProtected: target ? !petState(target.pet_id).attackable : false
+    })
+  );
 
   async function strike() {
     if (!mine || !target) return;
-    if (staked) {
-      toastError('This pet is working in the AI Lab — unstake it to fight');
-      return;
-    }
     if (blocked) {
       toastError(blocked);
       return;
@@ -72,7 +84,7 @@
           <img class="pet" src={petImage(target)} alt={target.name} />
           <small class="block text-center text-black">{target.name}</small>
           <small class="block text-center text-[0.6rem] text-[#00000088]">
-            LV {target.level} · {target.status}
+            LV {target.level} · {petStatus(target, now)}
           </small>
         {:else}
           <small class="text-black">No opponents yet</small>
@@ -83,7 +95,7 @@
       <div class="absolute bottom-[22%] left-[14%] {striking ? 'translate-x-3 transition-transform' : 'transition-transform'}">
         <PetCarousel pets={player.pets} index={mineIndex} onselect={(next) => (mineIndex = next)} battle />
         <small class="block text-center text-[0.6rem] text-[#00000088]">
-          LV {mine?.level} · {mine?.status}
+          LV {mine?.level} · {mine ? petStatus(mine, now) : '-'}
         </small>
       </div>
     </div>
@@ -98,20 +110,27 @@
         <small class="text-black">{target ? `${target.name} (LV ${target.level})` : 'Pick one'}</small>
       </button>
 
-      {#if blocked || staked}
-        <small class="text-center text-[0.65rem] text-[#00000088]">
-          {staked ? 'This pet is staked in the AI Lab' : blocked}
-        </small>
+      <div class="flex flex-row justify-between rounded-lg bg-[#a9c6e4] px-3 py-2">
+        <small class="text-black">Wager</small>
+        <small class="text-black">{BATTLE_WAGER_CREDITS} ACR · loser wounded {WOUND_HOURS}h</small>
+      </div>
+
+      {#if blocked}
+        <small class="text-center text-[0.65rem] text-[#00000088]">{blocked}</small>
       {/if}
 
       <button
         type="button"
         onclick={strike}
-        disabled={!target || !!blocked || staked || striking}
+        disabled={!target || !!blocked || striking}
         class="h-14 w-full rounded-lg bg-[#2d3c53] disabled:opacity-50"
       >
         <span class="text-xl font-semibold text-white">{striking ? 'ATTACKING…' : 'ATTACK'}</span>
       </button>
+
+      <small class="text-center text-[0.6rem] text-[#00000088]">
+        Nobody's pet dies here. The wager moves to the winner and the loser needs healing.
+      </small>
     </div>
     <div class="clear"></div>
   {/if}
@@ -122,19 +141,29 @@
 <Modal title="Choose an opponent" open={picking} onclose={() => (picking = false)}>
   <div class="flex max-h-[60vh] flex-col gap-2 overflow-y-auto">
     {#each player.opponents as opponent, index (opponent.pet_id)}
+      {@const info = petState(opponent.pet_id)}
       <button
         type="button"
         onclick={() => {
           targetIndex = index;
           picking = false;
         }}
-        class="flex flex-row items-center justify-between rounded-lg border-2 border-[#304053] px-2 py-1"
+        disabled={!info.attackable}
+        class="flex flex-row items-center justify-between rounded-lg border-2 border-[#304053] px-2 py-1 disabled:opacity-40"
       >
         <div class="flex flex-row items-center gap-2">
           <img width="36" height="36" src={petImage(opponent)} alt="" />
           <div class="flex flex-col text-left">
             <small>{opponent.name}</small>
-            <small class="text-[0.6rem] text-[#00000088]">{opponent.owner_id}</small>
+            <small class="text-[0.6rem] text-[#00000088]">
+              {#if info.staked}
+                in the AI Lab
+              {:else if !info.attackable}
+                protected
+              {:else}
+                {opponent.owner_id}
+              {/if}
+            </small>
           </div>
         </div>
         <small>LV {opponent.level}</small>

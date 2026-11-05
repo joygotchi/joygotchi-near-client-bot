@@ -4,9 +4,11 @@ import { viewFunction } from '#lib/near/rpc';
 import { callFunction, ftTransferCall } from '#lib/near/tx';
 import {
   CREDIT_DECIMALS,
+  CREDIT_ITEMS,
   JOY_DECIMALS,
   SINKS,
   type CreditAction,
+  type CreditItemKey,
   type Rarity
 } from './params';
 
@@ -35,6 +37,34 @@ export type StakePool = {
   staked_pets: number;
   updated_at: string;
 };
+
+/** Per-pet item and battle state, from `pet-stake::get_pet_state`. */
+export type PetStateView = {
+  pet_id: number;
+  /** Nanosecond timestamp; 0 means not wounded. */
+  wounded_until: string;
+  /** Nanosecond timestamp; 0 means no ward. */
+  shielded_until: string;
+  lens_feeds_left: number;
+  star_guard: boolean;
+  staked: boolean;
+  /** False while staked, warded or wounded. */
+  attackable: boolean;
+};
+
+export const EMPTY_PET_STATE = (petId: number): PetStateView => ({
+  pet_id: petId,
+  wounded_until: '0',
+  shielded_until: '0',
+  lens_feeds_left: 0,
+  star_guard: false,
+  staked: false,
+  attackable: true
+});
+
+/** Is a nanosecond deadline still in the future? */
+export const activeUntil = (nanos: string, nowMs = Date.now()) =>
+  Number(nanos || '0') / 1e6 > nowMs;
 
 export type StakedPetView = {
   pet_id: number;
@@ -102,6 +132,41 @@ export async function getStakedPets(
   }
 }
 
+export async function getPetStates(
+  petIds: number[],
+  fetchImpl: typeof fetch = fetch
+): Promise<Record<number, PetStateView>> {
+  if (petIds.length === 0) return {};
+  try {
+    const states = await viewFunction<PetStateView[]>(
+      STAKE_CONTRACT,
+      'get_pet_states',
+      { pet_ids: petIds },
+      fetchImpl
+    );
+    return Object.fromEntries((states ?? []).map((state) => [state.pet_id, state]));
+  } catch {
+    return Object.fromEntries(petIds.map((id) => [id, EMPTY_PET_STATE(id)]));
+  }
+}
+
+/** Credit item ids and prices as the contract has them. */
+export async function getCreditItemPrices(
+  fetchImpl: typeof fetch = fetch
+): Promise<Record<number, string>> {
+  try {
+    const items = await viewFunction<Array<[number, string]>>(
+      STAKE_CONTRACT,
+      'get_items',
+      {},
+      fetchImpl
+    );
+    return Object.fromEntries(items ?? []);
+  } catch {
+    return {};
+  }
+}
+
 // ── Calls ────────────────────────────────────────────────────────────────────
 
 /** Put a pet to work in the AI lab. It stops being able to battle. */
@@ -137,6 +202,19 @@ export const setAutoFeedBudget = (creditsPerDay: number) =>
     budget: parseAmount(creditsPerDay.toString(), CREDIT_DECIMALS)
   });
 
+/**
+ * Buy a credit item for a pet. Effects are pet state with a deadline or a
+ * counter — none of them touch staking weight, which is what keeps the credit
+ * accumulator exact.
+ */
+export const buyCreditItem = (key: CreditItemKey, petId: number) =>
+  callFunction(
+    STAKE_CONTRACT,
+    'buy_credit_item',
+    { item_id: CREDIT_ITEMS[key].id, pet_id: petId },
+    { gas: GAS.heavy }
+  );
+
 /** One-way $JOY -> credits. Deliberately a poor rate; see docs/ECONOMY.md. */
 export const buyCreditsWithJoy = (joyAmount: number) =>
   ftTransferCall(
@@ -146,6 +224,6 @@ export const buyCreditsWithJoy = (joyAmount: number) =>
     JSON.stringify({ action: 'buy_credits' })
   );
 
-/** Daily sponsored credits so new players can try AI feed before owning a pet. */
+/** One-off sponsored credits so new players can try AI feed before owning a pet. */
 export const claimFaucetCredits = () =>
   callFunction(STAKE_CONTRACT, 'claim_faucet', {}, { gas: GAS.call });

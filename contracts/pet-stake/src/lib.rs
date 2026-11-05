@@ -31,7 +31,6 @@ pub use types::*;
 
 const GAS_FOR_METADATA: Gas = Gas::from_tgas(10);
 const GAS_FOR_RESOLVE: Gas = Gas::from_tgas(15);
-const ONE_DAY_NANOS: u64 = 24 * 60 * 60 * NANOS_PER_SECOND;
 
 #[derive(BorshSerialize, BorshStorageKey)]
 #[borsh(crate = "near_sdk::borsh")]
@@ -39,6 +38,8 @@ enum StorageKey {
     Accounts,
     Pets,
     Prices,
+    PetStates,
+    ItemPrices,
 }
 
 /// The view this contract needs from the game contract. A deployment whose game
@@ -76,6 +77,14 @@ pub struct PetStake {
     pets: UnorderedMap<u64, StakedPet>,
     /// Price of each credit sink, in micro-credits.
     prices: LookupMap<String, u128>,
+    /// Per-pet item and battle state. Exists for unstaked pets too.
+    pet_states: UnorderedMap<u64, PetState>,
+    /// Price of each credit item, in micro-credits.
+    item_prices: LookupMap<u16, u128>,
+    /// Credits a challenger puts up to attack, in micro-credits.
+    battle_wager: u128,
+    /// Share of the pot taken as rake, in basis points.
+    battle_rake_bps: u16,
 
     total_distributed: u128,
     total_spent: u128,
@@ -111,26 +120,42 @@ impl PetStake {
             accounts: UnorderedMap::new(StorageKey::Accounts),
             pets: UnorderedMap::new(StorageKey::Pets),
             prices: LookupMap::new(StorageKey::Prices),
+            pet_states: UnorderedMap::new(StorageKey::PetStates),
+            item_prices: LookupMap::new(StorageKey::ItemPrices),
+            battle_wager: 10_000, // 0.01 credit
+            battle_rake_bps: 500, // 5%
             total_distributed: 0,
             total_spent: 0,
             sale_reserve: 0,
             // 400 JOY (18 decimals) for one credit — deliberately a bad deal.
             joy_per_credit: 400 * 10u128.pow(18),
-            faucet_amount: ONE_CREDIT / 20, // 0.05 credit per day
+            // One-off grant, not a daily one: NEAR implicit accounts are nearly
+            // free to create, and 0.05/day per account would let a script with
+            // a thousand accounts drain a $500 monthly budget three times over.
+            faucet_amount: ONE_CREDIT / 100, // 0.01 credit, once per account
             paused: false,
         };
 
         // Keep these in step with src/lib/economy/params.ts.
         for (action, credits) in [
-            ("ai_feed", 20_000u128),
-            ("train", 50_000),
+            ("ai_feed", 2_000u128),
+            ("train", 8_000),
             ("evolve", 500_000),
-            ("craft_item", 100_000),
-            ("chat", 5_000),
+            ("craft_item", 20_000),
+            ("chat", 1_000),
             ("revive", 1_000_000),
             ("auto_feed", 15_000),
         ] {
             contract.prices.insert(&action.to_string(), &credits);
+        }
+
+        for (item, credits) in [
+            (ITEM_TONIC, 10_000u128),
+            (ITEM_WARD, 50_000),
+            (ITEM_LENS, 20_000),
+            (ITEM_CHARM, 15_000),
+        ] {
+            contract.item_prices.insert(&item, &credits);
         }
 
         contract
@@ -392,6 +417,22 @@ impl PetStake {
         self.accounts.insert(&account_id, &account);
         self.total_spent += price;
 
+        // A Focus Lens is consumed here, and whether it applied goes into the
+        // event: the backend reads this transaction's logs to decide the XP
+        // multiplier, so the bonus cannot be claimed by a client that merely
+        // says it has one.
+        let mut lens_applied = false;
+        if action == "ai_feed" {
+            if let Some(id) = pet_id {
+                let mut state = self.pet_state_or_default(id);
+                if state.lens_feeds_left > 0 {
+                    state.lens_feeds_left -= 1;
+                    lens_applied = true;
+                    self.pet_states.insert(&id, &state);
+                }
+            }
+        }
+
         self.log_event(
             "credit_spent",
             json!({
@@ -399,13 +440,175 @@ impl PetStake {
                 "action": action,
                 "pet_id": pet_id,
                 "amount": U128(price),
+                "lens_applied": lens_applied,
             }),
         );
 
         U128(price)
     }
 
-    /// A small daily grant, so a new player can try AI feed before owning a pet.
+    // ── Credit items ─────────────────────────────────────────────────────────
+
+    fn pet_state_or_default(&self, pet_id: u64) -> PetState {
+        self.pet_states.get(&pet_id).unwrap_or_default()
+    }
+
+    /// Buy one credit item for a pet.
+    ///
+    /// When the pet is staked here we can check ownership and do. For an
+    /// unstaked pet we cannot without a cross-contract call, so we allow it:
+    /// the only thing at stake is the buyer's own credits, and every effect is
+    /// beneficial to the pet.
+    pub fn buy_credit_item(&mut self, item_id: u16, pet_id: u64) -> U128 {
+        self.assert_running();
+        self.update_pool();
+
+        let price = self.item_prices.get(&item_id).expect("Unknown item");
+        let account_id = env::predecessor_account_id();
+
+        if let Some(pet) = self.pets.get(&pet_id) {
+            require!(pet.owner_id == account_id, "That pet belongs to someone else");
+        }
+
+        let mut account = self.account_or_default(&account_id);
+        self.harvest(&mut account);
+        require!(
+            account.credit_balance >= price,
+            "Not enough credits — claim or convert some first"
+        );
+        account.credit_balance -= price;
+        self.accounts.insert(&account_id, &account);
+        self.total_spent += price;
+
+        let now = env::block_timestamp();
+        let mut state = self.pet_state_or_default(pet_id);
+
+        match item_id {
+            ITEM_TONIC => state.wounded_until = 0,
+            ITEM_WARD => {
+                // Extend an existing ward rather than cutting it short.
+                let from = state.shielded_until.max(now);
+                state.shielded_until = from + WARD_SECONDS * NANOS_PER_SECOND;
+            }
+            ITEM_LENS => {
+                state.lens_feeds_left = state.lens_feeds_left.saturating_add(LENS_FEEDS);
+            }
+            ITEM_CHARM => state.star_guard = true,
+            _ => env::panic_str("Unknown item"),
+        }
+
+        self.pet_states.insert(&pet_id, &state);
+
+        self.log_event(
+            "item_bought",
+            json!({
+                "account_id": account_id,
+                "pet_id": pet_id,
+                "item_id": item_id,
+                "credits": U128(price),
+            }),
+        );
+
+        U128(price)
+    }
+
+    // ── Battles ──────────────────────────────────────────────────────────────
+
+    /// Settle a battle. Called by the game contract, which decides who won.
+    ///
+    /// The loser's wager moves to the winner and the loser is wounded for a
+    /// while. No pet dies: credits are streamed by weight share, so destroying
+    /// another staker's pet would raise the attacker's own income, which makes
+    /// griefing directly profitable. Battle therefore moves credits between
+    /// players instead of destroying what they paid for.
+    ///
+    /// Owner accounts are passed in rather than looked up here: a pet that can
+    /// be attacked is by definition not staked, so this contract holds no
+    /// record of who owns it. The game contract is the authority on ownership
+    /// and is the only account allowed to call this.
+    pub fn report_battle(
+        &mut self,
+        winner_pet_id: u64,
+        winner_id: AccountId,
+        loser_pet_id: u64,
+        loser_id: AccountId,
+    ) -> BattleOutcome {
+        self.assert_running();
+        let caller = env::predecessor_account_id();
+        require!(
+            caller == self.game_contract || caller == self.owner_id,
+            "Only the game contract can settle battles"
+        );
+        require!(winner_pet_id != loser_pet_id, "A pet cannot fight itself");
+        require!(winner_id != loser_id, "Both pets have the same owner");
+        require!(
+            self.is_attackable(loser_pet_id),
+            "That pet is protected right now"
+        );
+        require!(
+            !self.is_staked(winner_pet_id),
+            "A pet in the AI Lab cannot fight"
+        );
+
+        self.update_pool();
+
+        let mut loser = self.account_or_default(&loser_id);
+        self.harvest(&mut loser);
+
+        // Take what the loser can cover, so a battle never fails just because
+        // they are short — it simply pays out less.
+        let pot = self.battle_wager.min(loser.credit_balance);
+        let rake = pot * self.battle_rake_bps as u128 / 10_000;
+        let transferred = pot - rake;
+        loser.credit_balance -= pot;
+
+        let now = env::block_timestamp();
+        let mut loser_state = self.pet_state_or_default(loser_pet_id);
+        loser_state.wounded_until = now + WOUND_SECONDS * NANOS_PER_SECOND;
+
+        let star_protected = loser_state.star_guard;
+        if star_protected {
+            loser_state.star_guard = false;
+        }
+
+        self.pet_states.insert(&loser_pet_id, &loser_state);
+        self.accounts.insert(&loser_id, &loser);
+
+        let mut winner = self.account_or_default(&winner_id);
+        self.harvest(&mut winner);
+        winner.credit_balance += transferred;
+        self.accounts.insert(&winner_id, &winner);
+
+        // Rake funds the reserve behind $JOY conversions and the faucet, so PvP
+        // never dilutes the staking stream.
+        self.sale_reserve += rake;
+
+        self.log_event(
+            "battle_settled",
+            json!({
+                "winner_id": winner_id,
+                "loser_id": loser_id,
+                "winner_pet_id": winner_pet_id,
+                "loser_pet_id": loser_pet_id,
+                "transferred": U128(transferred),
+                "rake": U128(rake),
+                "star_protected": star_protected,
+            }),
+        );
+
+        BattleOutcome {
+            transferred: U128(transferred),
+            rake: U128(rake),
+            star_protected,
+        }
+    }
+
+
+    /// A one-off grant, so a new player can try AI Feed before owning a pet.
+    ///
+    /// Once per account, not once per day: NEAR implicit accounts are nearly
+    /// free to create, so a daily faucet is a sybil tap on the treasury rather
+    /// than an onboarding gift.
     pub fn claim_faucet(&mut self) -> U128 {
         self.assert_running();
 
@@ -413,13 +616,7 @@ impl PetStake {
         let mut account = self.account_or_default(&account_id);
         let now = env::block_timestamp();
 
-        // A fresh account has `last_faucet_at == 0`, which is "never claimed"
-        // rather than "claimed at the dawn of the chain".
-        require!(
-            account.last_faucet_at == 0
-                || now.saturating_sub(account.last_faucet_at) >= ONE_DAY_NANOS,
-            "Come back tomorrow"
-        );
+        require!(account.last_faucet_at == 0, "You have already used the faucet");
         require!(
             self.sale_reserve >= self.faucet_amount,
             "The faucet is dry — try again later"
@@ -475,6 +672,22 @@ impl PetStake {
     pub fn set_action_price(&mut self, action: String, credits: U128) {
         self.assert_owner();
         self.prices.insert(&action, &credits.0);
+    }
+
+    pub fn set_item_price(&mut self, item_id: u16, credits: U128) {
+        self.assert_owner();
+        self.item_prices.insert(&item_id, &credits.0);
+    }
+
+    pub fn set_battle_params(&mut self, wager: U128, rake_bps: u16) {
+        self.assert_owner();
+        require!(rake_bps <= 2_000, "Rake cannot exceed 20%");
+        self.battle_wager = wager.0;
+        self.battle_rake_bps = rake_bps;
+        self.log_event(
+            "battle_params_set",
+            json!({ "wager": wager, "rake_bps": rake_bps }),
+        );
     }
 
     pub fn set_joy_per_credit(&mut self, joy_per_credit: U128) {
@@ -576,14 +789,63 @@ impl PetStake {
             .unwrap_or_default()
     }
 
-    /// The game contract should call this before allowing an attack: a pet at
-    /// work in the lab is not available to fight.
+    /// A pet at work in the lab is not available to fight.
     pub fn is_staked(&self, pet_id: u64) -> bool {
         self.pets.get(&pet_id).is_some()
     }
 
+    /// The game contract must call this before allowing an attack.
+    ///
+    /// A staked pet is unavailable in *both* directions: it cannot attack, and
+    /// it cannot be attacked. Without the second half the AI Lab would be a
+    /// honeypot — staking would mark you as a target, and cutting another
+    /// staker's weight raises the attacker's own share of the stream.
+    pub fn is_attackable(&self, pet_id: u64) -> bool {
+        if self.pets.get(&pet_id).is_some() {
+            return false;
+        }
+        let now = env::block_timestamp();
+        let state = self.pet_state_or_default(pet_id);
+        state.shielded_until <= now && state.wounded_until <= now
+    }
+
+    pub fn get_pet_state(&self, pet_id: u64) -> PetStateView {
+        let state = self.pet_state_or_default(pet_id);
+        let staked = self.pets.get(&pet_id).is_some();
+        let now = env::block_timestamp();
+
+        PetStateView {
+            pet_id,
+            wounded_until: U64(state.wounded_until),
+            shielded_until: U64(state.shielded_until),
+            lens_feeds_left: state.lens_feeds_left,
+            star_guard: state.star_guard,
+            staked,
+            attackable: !staked && state.shielded_until <= now && state.wounded_until <= now,
+        }
+    }
+
+    pub fn get_pet_states(&self, pet_ids: Vec<u64>) -> Vec<PetStateView> {
+        pet_ids
+            .into_iter()
+            .map(|pet_id| self.get_pet_state(pet_id))
+            .collect()
+    }
+
     pub fn get_action_price(&self, action: String) -> Option<U128> {
         self.prices.get(&action).map(U128)
+    }
+
+    pub fn get_item_price(&self, item_id: u16) -> Option<U128> {
+        self.item_prices.get(&item_id).map(U128)
+    }
+
+    /// Every credit item and its price, for the shop UI.
+    pub fn get_items(&self) -> Vec<(u16, U128)> {
+        [ITEM_TONIC, ITEM_WARD, ITEM_LENS, ITEM_CHARM]
+            .into_iter()
+            .filter_map(|id| self.item_prices.get(&id).map(|price| (id, U128(price))))
+            .collect()
     }
 
     pub fn get_config(&self) -> near_sdk::serde_json::Value {
@@ -594,6 +856,11 @@ impl PetStake {
             "joy_per_credit": U128(self.joy_per_credit),
             "faucet_amount": U128(self.faucet_amount),
             "credit_decimals": CREDIT_DECIMALS,
+            "battle_wager": U128(self.battle_wager),
+            "battle_rake_bps": self.battle_rake_bps,
+            "ward_seconds": WARD_SECONDS,
+            "wound_seconds": WOUND_SECONDS,
+            "lens_feeds": LENS_FEEDS,
         })
     }
 }
@@ -750,12 +1017,12 @@ mod tests {
         let claimed = contract.claim_credits().0;
         assert!(claimed > 0);
 
-        let spent = contract.spend_credits("ai_feed".to_string(), Some(1), U128(20_000)).0;
-        assert_eq!(spent, 20_000);
+        let spent = contract.spend_credits("ai_feed".to_string(), Some(1), U128(2_000)).0;
+        assert_eq!(spent, 2_000);
 
         let view = contract.get_account(alice()).unwrap();
-        assert_eq!(view.credit_balance.0, claimed - 20_000);
-        assert_eq!(contract.get_pool().total_spent.0, 20_000);
+        assert_eq!(view.credit_balance.0, claimed - 2_000);
+        assert_eq!(contract.get_pool().total_spent.0, 2_000);
     }
 
     #[test]
@@ -763,7 +1030,7 @@ mod tests {
     fn cannot_spend_what_you_do_not_have() {
         let mut contract = deploy();
         testing_env!(ctx(alice(), 10).build());
-        contract.spend_credits("ai_feed".to_string(), None, U128(20_000));
+        contract.spend_credits("ai_feed".to_string(), None, U128(2_000));
     }
 
     #[test]
@@ -843,28 +1110,23 @@ mod tests {
     }
 
     #[test]
-    fn faucet_is_once_a_day() {
+    fn faucet_grants_once_per_account() {
         let mut contract = deploy();
 
         testing_env!(ctx(owner(), 0).build());
         contract.fund_reserve(U128(ONE_CREDIT));
 
         testing_env!(ctx(alice(), 100).build());
-        let first = contract.claim_faucet().0;
-        assert_eq!(first, ONE_CREDIT / 20);
-
-        // A day and a bit later it works again.
-        testing_env!(ctx(alice(), 100 + 24 * 60 * 60 + 1).build());
-        contract.claim_faucet();
+        assert_eq!(contract.claim_faucet().0, ONE_CREDIT / 100);
         assert_eq!(
             contract.get_account(alice()).unwrap().credit_balance.0,
-            2 * ONE_CREDIT / 20
+            ONE_CREDIT / 100
         );
     }
 
     #[test]
-    #[should_panic(expected = "Come back tomorrow")]
-    fn faucet_cannot_be_drained() {
+    #[should_panic(expected = "already used the faucet")]
+    fn faucet_cannot_be_farmed_by_waiting() {
         let mut contract = deploy();
 
         testing_env!(ctx(owner(), 0).build());
@@ -872,6 +1134,241 @@ mod tests {
 
         testing_env!(ctx(alice(), 100).build());
         contract.claim_faucet();
+
+        // A week later it is still one grant per account, not one per day.
+        testing_env!(ctx(alice(), 100 + 7 * 24 * 60 * 60).build());
         contract.claim_faucet();
+    }
+
+    // ── Credit items ─────────────────────────────────────────────────────────
+
+    /// Stake a pet at t=0. Every pet must be staked before the clock moves, or
+    /// the ones added later accrue nothing and have nothing to claim.
+    fn stake_at_zero(contract: &mut PetStake, who: AccountId, pet_id: u64) {
+        testing_env!(ctx(owner(), 0).build());
+        contract.admin_set_pet(pet_id, who, attrs(10, 2, 2, Rarity::Epic));
+    }
+
+    /// Stake one pet, run an epoch, claim — the account now has credits.
+    fn funded(contract: &mut PetStake, who: AccountId, pet_id: u64) {
+        stake_at_zero(contract, who.clone(), pet_id);
+        testing_env!(ctx(who, EPOCH_SECONDS).build());
+        contract.claim_credits();
+    }
+
+    /// Two players, each with a staked pet and a claimed balance, both out of
+    /// the lab so they are free to fight.
+    fn two_fighters(contract: &mut PetStake) {
+        stake_at_zero(contract, alice(), 1);
+        stake_at_zero(contract, bob(), 2);
+
+        testing_env!(ctx(alice(), EPOCH_SECONDS).build());
+        contract.claim_credits();
+        contract.unstake_pet(1);
+
+        testing_env!(ctx(bob(), EPOCH_SECONDS).build());
+        contract.claim_credits();
+        contract.unstake_pet(2);
+    }
+
+    #[test]
+    fn ward_makes_a_pet_unattackable_and_extends() {
+        let mut contract = deploy();
+        funded(&mut contract, alice(), 1);
+
+        // Unstake so the pet is attackable to begin with.
+        contract.unstake_pet(1);
+        assert!(contract.is_attackable(1));
+
+        contract.buy_credit_item(ITEM_WARD, 1);
+        let state = contract.get_pet_state(1);
+        assert!(!state.attackable);
+        assert!(!contract.is_attackable(1));
+
+        let first_until = state.shielded_until.0;
+
+        // A second ward stacks on top instead of restarting from now.
+        contract.buy_credit_item(ITEM_WARD, 1);
+        let second_until = contract.get_pet_state(1).shielded_until.0;
+        assert_eq!(second_until, first_until + WARD_SECONDS * NANOS_PER_SECOND);
+    }
+
+    #[test]
+    fn ward_expires_on_its_own() {
+        let mut contract = deploy();
+        funded(&mut contract, alice(), 1);
+        contract.unstake_pet(1);
+        contract.buy_credit_item(ITEM_WARD, 1);
+
+        assert!(!contract.is_attackable(1));
+
+        // A day and a second later.
+        testing_env!(ctx(alice(), EPOCH_SECONDS + WARD_SECONDS + 1).build());
+        assert!(contract.is_attackable(1));
+    }
+
+    #[test]
+    fn lens_applies_to_feeds_then_runs_out() {
+        let mut contract = deploy();
+        funded(&mut contract, alice(), 1);
+
+        contract.buy_credit_item(ITEM_LENS, 1);
+        assert_eq!(contract.get_pet_state(1).lens_feeds_left, LENS_FEEDS);
+
+        for _ in 0..LENS_FEEDS {
+            contract.spend_credits("ai_feed".to_string(), Some(1), U128(2_000));
+        }
+        assert_eq!(contract.get_pet_state(1).lens_feeds_left, 0);
+
+        // Feeding past the lens must not underflow the counter.
+        contract.spend_credits("ai_feed".to_string(), Some(1), U128(2_000));
+        assert_eq!(contract.get_pet_state(1).lens_feeds_left, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Unknown item")]
+    fn rejects_unknown_items() {
+        let mut contract = deploy();
+        funded(&mut contract, alice(), 1);
+        contract.buy_credit_item(999, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "belongs to someone else")]
+    fn cannot_buy_items_for_someone_elses_staked_pet() {
+        let mut contract = deploy();
+        stake_at_zero(&mut contract, alice(), 1);
+        stake_at_zero(&mut contract, bob(), 2);
+
+        testing_env!(ctx(bob(), EPOCH_SECONDS).build());
+        contract.claim_credits();
+        contract.buy_credit_item(ITEM_WARD, 1);
+    }
+
+    #[test]
+    fn staked_pet_cannot_be_attacked() {
+        let mut contract = deploy();
+        funded(&mut contract, alice(), 1);
+        assert!(contract.get_pet_state(1).staked);
+        assert!(!contract.is_attackable(1));
+    }
+
+    // ── Battles ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn battle_moves_credits_and_wounds_the_loser() {
+        let mut contract = deploy();
+        two_fighters(&mut contract);
+
+        let before_winner = contract.get_account(alice()).unwrap().credit_balance.0;
+        let before_loser = contract.get_account(bob()).unwrap().credit_balance.0;
+
+        testing_env!(ctx(game(), EPOCH_SECONDS).build());
+        let outcome = contract.report_battle(1, alice(), 2, bob());
+
+        // 0.01 credit pot, 5% rake.
+        assert_eq!(outcome.rake.0, 500);
+        assert_eq!(outcome.transferred.0, 9_500);
+        assert!(!outcome.star_protected);
+
+        assert_eq!(
+            contract.get_account(alice()).unwrap().credit_balance.0,
+            before_winner + 9_500
+        );
+        assert_eq!(
+            contract.get_account(bob()).unwrap().credit_balance.0,
+            before_loser - 10_000
+        );
+
+        // Rake tops up the reserve rather than diluting the staking stream.
+        assert_eq!(contract.get_pool().sale_reserve.0, 500);
+
+        // The loser is wounded, not dead — and cannot be attacked again at once.
+        let state = contract.get_pet_state(2);
+        assert!(state.wounded_until.0 > 0);
+        assert!(!contract.is_attackable(2));
+    }
+
+    #[test]
+    fn charm_absorbs_the_star_loss_once() {
+        let mut contract = deploy();
+        two_fighters(&mut contract);
+
+        contract.buy_credit_item(ITEM_CHARM, 2);
+        assert!(contract.get_pet_state(2).star_guard);
+
+        testing_env!(ctx(game(), EPOCH_SECONDS).build());
+        assert!(contract.report_battle(1, alice(), 2, bob()).star_protected);
+        assert!(!contract.get_pet_state(2).star_guard, "the charm is consumed");
+    }
+
+    #[test]
+    #[should_panic(expected = "protected right now")]
+    fn battle_rejects_a_warded_pet() {
+        let mut contract = deploy();
+        two_fighters(&mut contract);
+
+        contract.buy_credit_item(ITEM_WARD, 2);
+
+        testing_env!(ctx(game(), EPOCH_SECONDS).build());
+        contract.report_battle(1, alice(), 2, bob());
+    }
+
+    #[test]
+    fn tonic_clears_a_wound() {
+        let mut contract = deploy();
+        two_fighters(&mut contract);
+
+        testing_env!(ctx(game(), EPOCH_SECONDS).build());
+        contract.report_battle(1, alice(), 2, bob());
+        assert!(!contract.is_attackable(2));
+
+        testing_env!(ctx(bob(), EPOCH_SECONDS).build());
+        contract.buy_credit_item(ITEM_TONIC, 2);
+        assert_eq!(contract.get_pet_state(2).wounded_until.0, 0);
+        assert!(contract.is_attackable(2));
+    }
+
+    #[test]
+    #[should_panic(expected = "Only the game contract")]
+    fn players_cannot_settle_their_own_battles() {
+        let mut contract = deploy();
+        two_fighters(&mut contract);
+
+        testing_env!(ctx(alice(), EPOCH_SECONDS).build());
+        contract.report_battle(1, alice(), 2, bob());
+    }
+
+    #[test]
+    #[should_panic(expected = "same owner")]
+    fn cannot_farm_credits_by_fighting_yourself() {
+        let mut contract = deploy();
+        stake_at_zero(&mut contract, alice(), 1);
+        stake_at_zero(&mut contract, alice(), 2);
+
+        testing_env!(ctx(alice(), EPOCH_SECONDS).build());
+        contract.claim_credits();
+        contract.unstake_pet(1);
+        contract.unstake_pet(2);
+
+        testing_env!(ctx(game(), EPOCH_SECONDS).build());
+        contract.report_battle(1, alice(), 2, alice());
+    }
+
+    #[test]
+    fn a_broke_loser_still_loses_the_fight() {
+        let mut contract = deploy();
+
+        // Bob never staked, so he has no credits at all.
+        funded(&mut contract, alice(), 1);
+        testing_env!(ctx(alice(), EPOCH_SECONDS).build());
+        contract.unstake_pet(1);
+
+        testing_env!(ctx(game(), EPOCH_SECONDS).build());
+        let outcome = contract.report_battle(1, alice(), 2, bob());
+
+        assert_eq!(outcome.transferred.0, 0, "nothing to take");
+        assert_eq!(outcome.rake.0, 0);
+        assert!(contract.get_pet_state(2).wounded_until.0 > 0, "still wounded");
     }
 }

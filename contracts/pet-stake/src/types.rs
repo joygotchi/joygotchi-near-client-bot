@@ -71,6 +71,60 @@ impl PetAttrs {
     }
 }
 
+/// Credit-item ids. The game contract's own $JOY shop uses 1-4, so these start
+/// at 101 to keep the two namespaces apart in events and logs.
+pub const ITEM_TONIC: u16 = 101;
+pub const ITEM_WARD: u16 = 102;
+pub const ITEM_LENS: u16 = 103;
+pub const ITEM_CHARM: u16 = 104;
+
+pub const WARD_SECONDS: u64 = 24 * 60 * 60;
+pub const WOUND_SECONDS: u64 = 6 * 60 * 60;
+pub const LENS_FEEDS: u8 = 10;
+
+/// Per-pet state that credit items and battles write.
+///
+/// Deliberately kept out of the weight calculation. The credit accumulator is
+/// exact, and a weight that changes on a deadline would need the pool updated
+/// at a moment when nothing is calling it — so every effect here gates
+/// *gameplay* instead of altering the stream.
+#[derive(BorshSerialize, BorshDeserialize, Default, Clone)]
+#[borsh(crate = "near_sdk::borsh")]
+pub struct PetState {
+    /// Cannot battle until this timestamp.
+    pub wounded_until: u64,
+    /// Cannot be attacked until this timestamp.
+    pub shielded_until: u64,
+    /// AI feeds still covered by a Focus Lens.
+    pub lens_feeds_left: u8,
+    /// Keeps the pet's star on its next loss.
+    pub star_guard: bool,
+}
+
+#[near(serializers = [json])]
+pub struct PetStateView {
+    pub pet_id: u64,
+    pub wounded_until: U64,
+    pub shielded_until: U64,
+    pub lens_feeds_left: u8,
+    pub star_guard: bool,
+    pub staked: bool,
+    /// False while staked, warded or wounded.
+    pub attackable: bool,
+}
+
+#[near(serializers = [json])]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct BattleOutcome {
+    /// Credits moved from the loser to the winner.
+    pub transferred: U128,
+    /// Credits taken as rake.
+    pub rake: U128,
+    /// True when a Star Charm absorbed the loss — the game contract should
+    /// leave the pet's star alone.
+    pub star_protected: bool,
+}
+
 #[near(serializers = [json, borsh])]
 #[derive(Clone, Debug)]
 pub struct StakedPet {

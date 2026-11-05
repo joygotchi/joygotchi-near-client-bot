@@ -113,22 +113,119 @@ treasury raises the number on-chain with `set_epoch_budget`.
 
 | Action | Cost | $JOY too | Real inference | Effect |
 |---|---|---|---|---|
-| **AI Feed** | 0.02 ACR | — | yes | The pet decides what it wants to eat. Matching its taste multiplies XP by **1.0–1.8×** |
-| **Train** | 0.05 ACR | 10 | yes | A generated sparring drill raises ATK or DEF |
-| **Craft item** | 0.10 ACR | 25 | yes | An item rolled from your pet's own history |
-| **Talk to pet** | 0.005 ACR | — | yes | One message, answered in the pet's voice |
+| **AI Feed** | 0.002 ACR | — | yes | The pet decides what it wants to eat. Matching its taste multiplies XP by **1.0–1.8×** |
+| **Train** | 0.008 ACR | 10 | yes | A generated sparring drill raises ATK or DEF |
+| **Craft item** | 0.02 ACR | 25 | yes | An item rolled from your pet's own history |
+| **Talk to pet** | 0.001 ACR | — | yes | One message, answered in the pet's voice |
 | **Evolve** | 0.50 ACR | 100 | no | Next evolution phase — permanently more weight |
 | **Revive** | 1.00 ACR | — | no | Bring a dying pet back |
 | **Auto-feed** | 0.015 ACR | — | no | The pet feeds itself while you are away |
 
-The four actions marked *real inference* are why this works. Their cost is not a
-number someone invented for a tokenomics slide — it is roughly what the model
-call costs. The sink can never run away from the source.
+### On the price of a feed
+
+An earlier version of this document claimed these prices were "roughly what the
+model call costs". That was wrong, and wrong in a way that mattered: a ~200-token
+completion costs on the order of **$0.0004**, so the original 0.02 ACR was a
+~50× markup, not cost recovery.
+
+The markup itself is fine — it is the margin that funds the game. The problem
+was what it did to playability:
+
+| Price of a feed | Feeds per month from a 500 ACR budget | Real NEAR AI cost | Feeds/day at 1,000 active players |
+|---|---|---|---|
+| 0.02 ACR | 25,000 | ~$10 | **0.8** |
+| 0.005 ACR | 100,000 | ~$40 | 3.3 |
+| **0.002 ACR** | 250,000 | ~$100 | **8.3** |
+
+Under one feed per player per day is unplayable — pets starve faster than that.
+The prices in the table above are the corrected ones: still a 5× margin over
+real inference, but a game you can actually play.
 
 AI Feed is the centrepiece. It is a slot machine you can actually read: the pet
 has a taste profile, you do not know exactly what it wants today, and a good
 match is worth nearly twice the XP of a bad one. It gives a reason to open the
 app that does not reduce to "tap the button".
+
+## Items
+
+Two shops, because two contracts own them.
+
+**The game contract's $JOY shop** is fixed on-chain and cannot be extended from
+here. Its real contents, read back out of the `items` array on live pets:
+
+| id | Item | Effect |
+|---|---|---|
+| 1 | Beef | +3h before starving, 1,000 points |
+| 2 | Water | +3h before starving, 10,000 points |
+| 3 | Shield | blocks one attack |
+| 4 | Holy Water | revives a starved pet |
+
+The old React client had Water on id 1 and Beef on id 2 — the wrong way round,
+so buying one gave you the other. Fixed in `JOY_ITEMS`.
+
+**Credit items** live in `pet-stake`, which is why there can be new ones:
+
+| id | Item | Cost | Effect |
+|---|---|---|---|
+| 101 | AI Tonic | 0.01 ACR | clears a wound immediately |
+| 102 | Sentinel Ward | 0.05 ACR | un-attackable for 24h; stacks rather than resetting |
+| 103 | Focus Lens | 0.02 ACR | +0.25 XP multiplier on the next 10 AI feeds |
+| 104 | Star Charm | 0.015 ACR | keeps your star if you lose the next battle |
+
+Every effect here is pet *state* with a deadline or a counter. **None of them
+touch staking weight.** That is deliberate: the credit accumulator is exact and
+well tested, and a weight that changed on a deadline would need the pool updated
+at a moment when nothing is calling it. Keeping items out of the weight maths is
+what makes them safe to add.
+
+The Focus Lens is consumed by the contract inside `spend_credits`, and whether it
+applied goes into the `credit_spent` event. The backend reads that event from the
+transaction logs, so the bonus cannot be claimed by a client that merely says it
+has one.
+
+## After a battle: nothing dies
+
+Pets do not die from fighting. Three reasons, in order of weight.
+
+**1. Death plus a share-based stream pays people to grief.** Credits are
+distributed by `your_weight / total_weight`. Killing another staker's pet lowers
+`total_weight`, which **raises the killer's own income**. That is not a side
+effect, it is a computable profit. Death and this stream must not ship together.
+
+**2. The defender is offline and did not choose.** The attacker picks the
+target. Dying of neglect is your own doing; losing a fight you started is a risk
+you took; having a stranger destroy a pet you paid for while you sleep is
+neither. That third case is the one that makes people uninstall.
+
+**3. Death's economic job is already done.** Supply sinks exist to keep mint
+demand alive, but pool dilution does that already: as `total_weight` grows your
+share shrinks, so you always want more or better pets. No need to destroy what
+players bought.
+
+So losing a battle costs this instead:
+
+| | |
+|---|---|
+| Wager | 0.01 ACR, moved from loser to winner |
+| Rake | 5% of the pot → `sale_reserve`, never out of `epoch_budget` |
+| Wound | 6 hours unable to battle; an AI Tonic clears it at once |
+| Star | lost, unless a Star Charm absorbs it |
+
+The wager is a **transfer, not a destruction**: the loser's loss is the winner's
+gain, so PvP is zero-sum between players rather than eating into the asset base
+the treasury has to back with real compute. Rake funds the reserve behind $JOY
+conversions and the faucet, so PvP never dilutes stakers.
+
+A loser who cannot cover the wager still loses the fight — the pot is simply
+whatever they had. Battles never fail for being poor.
+
+### Staked pets are off limits in both directions
+
+`is_attackable(pet_id)` returns false while a pet is staked, warded or wounded,
+and the game contract must consult it. A staked pet not being able to *attack*
+was never enough on its own: without the other half, staking would mark you as a
+target, and cutting a staker's weight is exactly what an attacker profits from.
+The AI Lab would have been a honeypot.
 
 ## Keeping it smooth
 
@@ -139,9 +236,14 @@ and never opens the app again. Four things guard against it:
    `JOY_FEED_COST` for 40% of the XP. Worse, never blocked.
 2. **Auto-feed.** Set a daily budget and your pets keep themselves alive from
    your credit balance while you sleep. Capped by you, off by default.
-3. **A daily faucet.** `claim_faucet` grants 0.05 credit a day from the
-   treasury's sale reserve — enough to try AI Feed twice before you own
-   anything. New players get to see the good part first.
+3. **A one-off faucet.** `claim_faucet` grants 0.01 credit, once per account,
+   from the treasury's sale reserve — five AI feeds, enough to see the good part
+   before you own anything.
+
+   It used to be 0.05 a day, which was a hole rather than a gift: NEAR implicit
+   accounts are nearly free to create, so a script with a thousand accounts
+   would have drawn $1,500/month against a $500 budget. One grant per account
+   caps the damage at a finite amount instead of a rate.
 4. **Accrual is visible.** The header ticks. You can watch the thing you earn.
 
 ## $JOY ↔ credit
@@ -219,7 +321,10 @@ telling the player what something will cost before they sign.
 |---|---|---|
 | `epoch_budget` | 500 ACR / 30 days | treasury, `set_epoch_budget` |
 | `joy_per_credit` | 400 JOY | treasury, `set_joy_per_credit` |
-| `faucet_amount` | 0.05 ACR / day | treasury, `set_faucet_amount` |
+| `faucet_amount` | 0.01 ACR, once per account | treasury, `set_faucet_amount` |
+| `battle_wager` | 0.01 ACR | treasury, `set_battle_params` |
+| `battle_rake_bps` | 500 (5%, capped at 20%) | treasury, `set_battle_params` |
+| ward / wound | 24h / 6h | fixed in `types.rs` |
 | mint price | 2 wNEAR | `mint-router::set_mint_price` |
 | credit decimals | 6 | fixed |
 | rarity weights | 100 / 160 / 260 / 400 | fixed in `Rarity::base_weight` |
@@ -228,10 +333,19 @@ telling the player what something will cost before they sign.
 
 Written down because they are real, not because they are solved:
 
-- **Staked pets and battling.** `pet-stake` exposes `is_staked(pet_id)` and the
-  client blocks the attack button, but the deployed game contract does not yet
-  call it. Until it does, a determined player could attack with a staked pet by
-  talking to the game contract directly.
+- **The game contract does not call our views yet.** `pet-stake` exposes
+  `is_attackable(pet_id)` and `report_battle(...)`, and the client respects
+  them, but the deployed game contract knows about neither. Until it does, a
+  determined player can attack a staked or warded pet by talking to the game
+  contract directly, and no battle settles any credits.
+- **Pets are not transferable at all.** `game.joyv1.near` is not NEP-171 — it
+  has no `nft_token`, `nft_transfer` or `nft_approve` (verified against mainnet).
+  So there is no marketplace and no exit liquidity: minting is a one-way
+  purchase, which caps what anyone will pay for a pet, which caps the mint
+  revenue that funds `epoch_budget`.
+- **Nobody has ever battled.** Of the 20 pets on mainnet, zero have ever
+  attacked or been attacked, and none is above level 1. The wager above is the
+  first reason to fight that the game has had; whether it is enough is untested.
 - **`get_pet_attrs`.** `stake_pet` reads the pet's owner and attributes from the
   game contract through this view, which the current deployment does not expose.
   `admin_set_pet` is the interim path for an operator or indexer to push them.

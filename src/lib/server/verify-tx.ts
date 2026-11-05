@@ -18,6 +18,12 @@ export type SpendReceipt = {
   action: string;
   petId: number | null;
   amount: string;
+  /**
+   * Whether a Focus Lens was consumed by this spend. Read from the contract's
+   * own event log, never from the client — otherwise anyone could claim the
+   * bonus by sending `lensActive: true`.
+   */
+  lensApplied: boolean;
 };
 
 /**
@@ -41,6 +47,29 @@ type TxStatus = {
   status: Record<string, unknown>;
   receipts_outcome: Array<{ outcome: { logs: string[]; status: Record<string, unknown> } }>;
 };
+
+type CreditSpentEvent = {
+  event?: string;
+  data?: Array<Record<string, unknown>>;
+};
+
+/** Pull the contract's `credit_spent` event out of a transaction's logs. */
+function findCreditSpent(tx: TxStatus): Record<string, unknown> | null {
+  for (const receipt of tx.receipts_outcome ?? []) {
+    for (const log of receipt.outcome?.logs ?? []) {
+      if (!log.startsWith('EVENT_JSON:')) continue;
+      try {
+        const event = JSON.parse(log.slice('EVENT_JSON:'.length)) as CreditSpentEvent;
+        if (event.event === 'credit_spent' && event.data?.[0]) {
+          return event.data[0];
+        }
+      } catch {
+        // Not our event; keep looking.
+      }
+    }
+  }
+  return null;
+}
 
 function decodeArgs(argsBase64: string): Record<string, unknown> {
   const binary = atob(argsBase64);
@@ -108,10 +137,15 @@ export async function verifySpendReceipt(input: {
     throw new ReceiptError(`Receipt paid for "${String(args.action)}", not "${action}"`);
   }
 
+  // The event is what the contract actually did, as opposed to what the call
+  // asked for, so bonuses are read from there.
+  const event = findCreditSpent(tx);
+
   return {
     accountId,
     action,
     petId: typeof args.pet_id === 'number' ? args.pet_id : null,
-    amount: typeof args.amount === 'string' ? args.amount : '0'
+    amount: typeof event?.amount === 'string' ? event.amount : '0',
+    lensApplied: event?.lens_applied === true
   };
 }

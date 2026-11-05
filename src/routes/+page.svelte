@@ -9,7 +9,7 @@
   import Modal from '#lib/components/Modal.svelte';
   import PetCarousel from '#lib/components/PetCarousel.svelte';
   import { formatCredits } from '#lib/economy/params';
-  import { renamePet, secondsUntilStarving } from '#lib/game/pets';
+  import { petStatus, renamePet, secondsUntilStarving } from '#lib/game/pets';
   import { wallet } from '#lib/near/wallet.svelte';
   import { creditsPerDay, isStaked, player, refreshPlayer } from '#lib/stores/player.svelte';
   import { withToast } from '#lib/stores/toast.svelte';
@@ -115,7 +115,7 @@
             <span class="text-[#00000088]">STAR</span>
           </div>
           <div class="flex flex-col text-center">
-            <p class="text-sm">{pet?.status ?? '-'}</p>
+            <p class="text-sm">{pet ? petStatus(pet) : '-'}</p>
             <span class="text-[#00000088]">STATUS</span>
           </div>
           <div class="flex flex-col text-center">

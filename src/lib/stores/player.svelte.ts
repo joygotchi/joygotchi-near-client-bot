@@ -1,7 +1,13 @@
 import { browser } from '$app/env';
 import { JOY_CONTRACT } from '#lib/config';
 import { CREDIT_DECIMALS, JOY_DECIMALS, SECONDS_PER_DAY } from '#lib/economy/params';
-import { getStakeAccount, getStakePool } from '#lib/economy/stake';
+import {
+  EMPTY_PET_STATE,
+  getPetStates,
+  getStakeAccount,
+  getStakePool,
+  type PetStateView
+} from '#lib/economy/stake';
 import { getPets, type Pet } from '#lib/game/pets';
 import { formatAmount } from '#lib/near/amount';
 import { ftBalanceOf } from '#lib/near/rpc';
@@ -22,9 +28,14 @@ export const player = $state({
   weight: 0,
   totalWeight: 0,
   autoFeedBudget: 0,
+  /** Item and battle state, keyed by pet id. */
+  petStates: {} as Record<number, PetStateView>,
   /** Wall-clock ms of the last refresh, used to extrapolate pending credits. */
   refreshedAt: 0
 });
+
+export const petState = (petId: number): PetStateView =>
+  player.petStates[petId] ?? EMPTY_PET_STATE(petId);
 
 /**
  * Credits accrued right now: the on-chain pending amount plus the stream that
@@ -70,6 +81,11 @@ export async function refreshPlayer(force = false): Promise<void> {
     player.stakedPetIds = stake.staked_pets ?? [];
     player.weight = Number(stake.weight || '0');
     player.totalWeight = Number(pool?.total_weight || '0');
+
+    // Opponents' states matter too: the battle screen has to know who is
+    // warded or wounded before it offers an attack.
+    const ids = [...mine, ...opponents].map((pet) => pet.pet_id);
+    player.petStates = await getPetStates(ids);
 
     const epochBudget = Number(pool?.epoch_budget || '0') / 10 ** CREDIT_DECIMALS;
     player.creditsPerSecond =

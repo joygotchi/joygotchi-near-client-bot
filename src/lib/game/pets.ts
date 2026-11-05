@@ -2,19 +2,48 @@ import { FT_CONTRACT, GAME_CONTRACT, GAS } from '#lib/config';
 import { viewFunction } from '#lib/near/rpc';
 import { callAndDecode, callFunction } from '#lib/near/tx';
 
+/** One owned item instance, as it appears inside `Pet.items`. */
+export type PetItem = {
+  item_id: number;
+  name: string;
+  points: number;
+  price: number;
+  price_delta: number;
+  stock: number;
+  shield: number;
+  time_extension: number;
+  is_revival: boolean;
+};
+
 /** Pet metadata as returned by `game.joyv1.near::get_all_pet_metadata`. */
 export type Pet = {
   pet_id: number;
   owner_id: string;
   name: string;
   category: string;
+  pet_species: number;
   pet_evolution_phase: number;
   level: number;
   star: number;
+  score: number;
+  pet_shield: number;
+  /**
+   * Last status the contract wrote. Stale: it only changes when somebody
+   * touches the pet, so 14 of the 20 pets on mainnet still say `HAPPY` while
+   * their starving deadline passed in 2024. Use `petStatus()` instead.
+   */
   status: string;
   reward_debt: string | number;
-  /** Nanoseconds until the pet starves. */
+  /**
+   * Absolute timestamp, in nanoseconds, at which the pet starves — NOT a
+   * remaining duration, despite the name.
+   */
   time_until_starving: number;
+  time_pet_born?: number;
+  items?: PetItem[];
+  pet_need_evolution_item?: boolean;
+  pet_has_evolution_item?: boolean;
+  pet_evolution_item_id?: number;
   last_attack_used?: number | string;
   last_attacked?: number | string;
 };
@@ -36,18 +65,89 @@ export const PET_SPECIES = [
   }
 ] as const;
 
-export const ITEMS = [
-  { id: 1, name: 'water', icon: '/assets/items/water.png', width: 20, joy: 1 },
-  { id: 2, name: 'beef', icon: '/assets/items/beef.png', width: 40, joy: 1 },
-  { id: 3, name: 'shield', icon: '/assets/items/shield.png', width: 40, joy: 1 },
-  { id: 4, name: 'holy water', icon: '/assets/items/holy_water.png', width: 40, joy: 2 }
+/**
+ * The game contract's own shop, paid for in $JOY.
+ *
+ * Ids and names come from the live contract (read back out of the `items`
+ * array on existing pets), not from the old client — which had Water on id 1
+ * and Beef on id 2, the wrong way round, so buying one gave you the other.
+ */
+export const JOY_ITEMS = [
+  {
+    id: 1,
+    name: 'Beef',
+    icon: '/assets/items/beef.png',
+    width: 40,
+    joy: 1,
+    points: 1000,
+    /** Milliseconds of starving time the item buys back. */
+    timeExtension: 10_800_000,
+    isRevival: false
+  },
+  {
+    id: 2,
+    name: 'Water',
+    icon: '/assets/items/water.png',
+    width: 20,
+    joy: 1,
+    points: 10_000,
+    timeExtension: 10_800_000,
+    isRevival: false
+  },
+  {
+    id: 3,
+    name: 'Shield',
+    icon: '/assets/items/shield.png',
+    width: 40,
+    joy: 1,
+    points: 0,
+    timeExtension: 0,
+    isRevival: false
+  },
+  {
+    id: 4,
+    name: 'Holy Water',
+    icon: '/assets/items/holy_water.png',
+    width: 40,
+    joy: 1,
+    points: 0,
+    timeExtension: 10_800_000,
+    isRevival: true
+  }
 ] as const;
+
+/** Kept for readability at call sites. */
+export const REVIVAL_ITEM_ID = 4;
 
 export const petImage = (pet: Pet) =>
   `/assets/animation/${pet.category}/${pet.pet_evolution_phase}.gif`;
 
-/** `time_until_starving` is in nanoseconds; the countdown wants seconds. */
-export const secondsUntilStarving = (pet: Pet) => Math.max(0, Math.round(pet.time_until_starving / 1e7));
+export type PetStatus = 'HAPPY' | 'HUNGRY' | 'DYING';
+
+/**
+ * Seconds left before the pet starves.
+ *
+ * `time_until_starving` is an absolute nanosecond timestamp. The old client
+ * divided it by 1e7 and treated the result as a remaining duration, which made
+ * the countdown read about 5,460 years.
+ */
+export function secondsUntilStarving(pet: Pet, nowMs = Date.now()): number {
+  const deadlineMs = pet.time_until_starving / 1e6;
+  return Math.max(0, Math.round((deadlineMs - nowMs) / 1000));
+}
+
+/**
+ * Status derived from the deadline rather than read from `Pet.status`, which
+ * the contract only refreshes when something touches the pet.
+ */
+export function petStatus(pet: Pet, nowMs = Date.now()): PetStatus {
+  const left = secondsUntilStarving(pet, nowMs);
+  if (left <= 0) return 'DYING';
+  if (left < 3 * 3600) return 'HUNGRY';
+  return 'HAPPY';
+}
+
+export const isAlive = (pet: Pet, nowMs = Date.now()) => secondsUntilStarving(pet, nowMs) > 0;
 
 // ── Views ────────────────────────────────────────────────────────────────────
 
@@ -82,6 +182,7 @@ export const createPet = (name: string, metadata: { title: string; description: 
 export const renamePet = (petId: number, name: string) =>
   callFunction(GAME_CONTRACT, 'change_name_pet', { pet_id: petId, name });
 
+/** Buy one of the game contract's $JOY items. */
 export const buyItem = (petId: number, itemId: number) =>
   callFunction(GAME_CONTRACT, 'buy_item', { pet_id: petId, item_id: itemId });
 
@@ -100,16 +201,28 @@ export const claimJoy = (accountId: string) =>
  * checked before sending the transaction, so players get an explanation instead
  * of a failed transaction.
  */
-export function attackBlockedReason(mine: Pet | undefined, target: Pet | undefined): string | null {
+export function attackBlockedReason(
+  mine: Pet | undefined,
+  target: Pet | undefined,
+  options: { nowMs?: number; mineStaked?: boolean; targetProtected?: boolean } = {}
+): string | null {
+  const nowMs = options.nowMs ?? Date.now();
+
   if (!mine) return 'Pick one of your pets first';
   if (!target) return 'Pick an opponent';
-  if (mine.status === 'DYING') return 'Your pet is dying — feed it first';
-  if (target.status === 'DYING') return 'That opponent is already dying';
+
+  // Statuses are derived, because `Pet.status` lags behind reality.
+  if (petStatus(mine, nowMs) === 'DYING') return 'Your pet is dying — feed it first';
+  if (petStatus(target, nowMs) === 'DYING') return 'That opponent is already dying';
+
+  if (options.mineStaked) return 'This pet is working in the AI Lab — unstake it to fight';
+  if (options.targetProtected) return 'That opponent is protected right now';
+
   if (mine.level > target.level) return 'You can only attack pets at your level or above';
 
   const lastAttacked = Number(target.last_attacked ?? 0);
   if (lastAttacked > 0) {
-    const hoursSince = (Date.now() - lastAttacked / 1e6) / 3_600_000;
+    const hoursSince = (nowMs - lastAttacked / 1e6) / 3_600_000;
     if (hoursSince < 1) return 'That opponent was attacked less than an hour ago';
   }
   return null;

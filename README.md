@@ -19,8 +19,14 @@ and Meteor Wallet), **NEAR Intents 1Click** for multichain payments, and
 - **Feed with AI.** Your pet decides what it wants to eat; a good taste match is
   worth up to 1.8× the XP. The call really does run on NEAR AI Cloud.
 - **Stake pets in the AI Lab** to earn AI credit every second, proportional to
-  pet weight. A staked pet cannot battle — that is the trade.
-- **Battle, mine and run missions** as before.
+  pet weight. A staked pet can neither attack nor be attacked — that is the
+  trade.
+- **Spend credits on items**: AI Tonic, Sentinel Ward, Focus Lens, Star Charm,
+  alongside the game contract's own $JOY shop.
+- **Battle for credits, not for blood.** The loser's wager goes to the winner
+  and the pet is wounded for a while. Nothing dies in a fight — see
+  [docs/ECONOMY.md](docs/ECONOMY.md) for why.
+- **Mine and run missions** as before.
 
 The full economic design, with worked numbers and the open issues, is in
 [docs/ECONOMY.md](docs/ECONOMY.md).

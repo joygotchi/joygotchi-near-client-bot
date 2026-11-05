@@ -117,7 +117,11 @@ export const SINKS: Record<CreditAction, SinkSpec> = {
   ai_feed: {
     action: 'ai_feed',
     label: 'AI Feed',
-    credits: 0.02,
+    // 0.002 ACR, not 0.02. A ~200-token completion costs roughly $0.0004, so
+    // this still carries a 5x margin — but at $0.02 the whole 500 ACR epoch
+    // budget bought only 25,000 feeds a month, which is under one feed per
+    // player per day once a thousand people play. See docs/ECONOMY.md.
+    credits: 0.002,
     description:
       'Your pet reasons about what it wants to eat. Matching its taste profile multiplies XP by 1.0–1.8x.',
     usesInference: true
@@ -125,7 +129,7 @@ export const SINKS: Record<CreditAction, SinkSpec> = {
   train: {
     action: 'train',
     label: 'Train',
-    credits: 0.05,
+    credits: 0.008,
     joy: 10,
     description: 'A simulated sparring session raises ATK or DEF.',
     usesInference: true
@@ -141,7 +145,7 @@ export const SINKS: Record<CreditAction, SinkSpec> = {
   craft_item: {
     action: 'craft_item',
     label: 'Craft item',
-    credits: 0.1,
+    credits: 0.02,
     joy: 25,
     description: 'Generate an item whose stats are rolled from your pet’s history.',
     usesInference: true
@@ -149,7 +153,7 @@ export const SINKS: Record<CreditAction, SinkSpec> = {
   chat: {
     action: 'chat',
     label: 'Talk to pet',
-    credits: 0.005,
+    credits: 0.001,
     description: 'One message to your pet, answered by NEAR AI with the pet’s own personality.',
     usesInference: true
   },
@@ -181,8 +185,118 @@ export const JOY_FEED_XP_PENALTY = 0.4;
  */
 export const JOY_PER_CREDIT = 400;
 
-/** Daily sponsored credits so a new player can try AI feed before owning a pet. */
-export const FAUCET_DAILY_CREDITS = 0.05;
+/**
+ * A one-off sponsored grant so a new player can try AI Feed before owning a
+ * pet. Deliberately once per account and small: a daily 0.05 ACR faucet is
+ * worth $18/account/year, and NEAR implicit accounts are nearly free to
+ * create, so a script with a thousand accounts would drain a $500 monthly
+ * budget three times over.
+ */
+export const FAUCET_GRANT_CREDITS = 0.01;
+
+// ── Credit items ─────────────────────────────────────────────────────────────
+
+/**
+ * Items paid for in AI credit, held by the staking contract.
+ *
+ * The game contract's own shop ($JOY: Beef, Water, Shield, Holy Water) is
+ * fixed on-chain and cannot be extended from here, so these live in
+ * `pet-stake` instead — see `JOY_ITEMS` in `#lib/game/pets` for the other set.
+ *
+ * Every effect here is pet *state* with a deadline or a counter. None of them
+ * touch staking weight: the credit accumulator is exact and well tested, and a
+ * time-varying weight would need the pool to be updated at a moment when
+ * nothing is calling it. Keeping items out of the weight maths is what makes
+ * them safe to add.
+ */
+export const CREDIT_ITEM_IDS = {
+  tonic: 101,
+  ward: 102,
+  lens: 103,
+  charm: 104
+} as const;
+
+export type CreditItemKey = keyof typeof CREDIT_ITEM_IDS;
+
+export type CreditItem = {
+  id: number;
+  key: CreditItemKey;
+  label: string;
+  credits: number;
+  icon: string;
+  description: string;
+  /** Short line shown once the item is active on a pet. */
+  activeLabel: string;
+};
+
+export const CREDIT_ITEMS: Record<CreditItemKey, CreditItem> = {
+  tonic: {
+    id: CREDIT_ITEM_IDS.tonic,
+    key: 'tonic',
+    label: 'AI Tonic',
+    credits: 0.01,
+    icon: '/assets/items/holy_water.png',
+    description: 'Clears a wound immediately instead of waiting it out.',
+    activeLabel: 'Healed'
+  },
+  ward: {
+    id: CREDIT_ITEM_IDS.ward,
+    key: 'ward',
+    label: 'Sentinel Ward',
+    credits: 0.05,
+    icon: '/assets/items/shield.png',
+    description: 'Nobody can attack this pet for 24 hours. Works while staked.',
+    activeLabel: 'Warded'
+  },
+  lens: {
+    id: CREDIT_ITEM_IDS.lens,
+    key: 'lens',
+    label: 'Focus Lens',
+    credits: 0.02,
+    icon: '/assets/item/star.png',
+    description: 'The next 10 AI feeds get +0.25 on the XP multiplier.',
+    activeLabel: 'Focused'
+  },
+  charm: {
+    id: CREDIT_ITEM_IDS.charm,
+    key: 'charm',
+    label: 'Star Charm',
+    credits: 0.015,
+    icon: '/assets/icon/diamond.svg',
+    description: 'Keeps your star if you lose the next battle.',
+    activeLabel: 'Charmed'
+  }
+};
+
+export const CREDIT_ITEM_LIST = Object.values(CREDIT_ITEMS);
+
+export const creditItemById = (id: number) =>
+  CREDIT_ITEM_LIST.find((item) => item.id === id);
+
+/** How long a Sentinel Ward lasts. */
+export const WARD_HOURS = 24;
+/** How long a battle wound lasts without a tonic. */
+export const WOUND_HOURS = 6;
+/** Feeds covered by one Focus Lens. */
+export const LENS_FEEDS = 10;
+/** Extra XP multiplier while a Focus Lens is active. */
+export const LENS_BONUS = 0.25;
+
+// ── Battle ───────────────────────────────────────────────────────────────────
+
+/**
+ * Credits a challenger must put up to attack, transferred to the winner.
+ *
+ * Battle moves credits between players rather than destroying a pet. Pets
+ * never die from a fight: with credits streamed by weight share, killing
+ * another staker's pet would raise the killer's own income, which makes
+ * griefing directly profitable. See the "post-battle" section of
+ * docs/ECONOMY.md.
+ */
+export const BATTLE_WAGER_CREDITS = 0.01;
+
+/** Share of the pot the treasury takes, in basis points. */
+export const BATTLE_RAKE_BPS = 500;
 
 // ── Levelling ────────────────────────────────────────────────────────────────
 
@@ -191,6 +305,13 @@ export const xpForLevel = (level: number) => Math.round(100 * Math.pow(1.18, Mat
 
 /** XP granted by one feed, before the taste multiplier. */
 export const BASE_FEED_XP = 35;
+
+/** Final XP for one AI feed. `tasteMatch` is 0..1, as the model reports it. */
+export function feedXp(tasteMatch: number, lensActive = false): number {
+  const match = Math.min(1, Math.max(0, tasteMatch));
+  const multiplier = 1 + match * 0.8 + (lensActive ? LENS_BONUS : 0);
+  return Math.round(BASE_FEED_XP * multiplier);
+}
 
 export function formatCredits(credits: number, maxFraction = 3): string {
   if (!Number.isFinite(credits)) return '0';
