@@ -301,12 +301,35 @@ impl PetStake {
         true
     }
 
+    /// Forget a pet's current stake record, taking its weight back out of both
+    /// the account and the pool.
+    ///
+    /// `internal_stake` is reached twice for the same pet: once when it is
+    /// staked, and again by `sync_pet` every time it levels up or evolves. The
+    /// attributes alone cannot tell those apart, so the weight has to be
+    /// *replaced*, never added. Adding it is what broke the pool on testnet —
+    /// one level-up left the account carrying its pet's weight twice, so
+    /// unstaking gave back only the newer half and `total_weight` kept paying
+    /// out for a pet that had already left.
+    fn drop_stake_record(&mut self, pet_id: u64, account: &mut Account) {
+        let Some(existing) = self.pets.get(&pet_id) else {
+            return;
+        };
+        account.weight = account.weight.saturating_sub(existing.weight.0);
+        self.total_weight = self.total_weight.saturating_sub(existing.weight.0);
+        account.staked.retain(|id| *id != pet_id);
+        self.pets.remove(&pet_id);
+    }
+
     fn internal_stake(&mut self, pet_id: u64, account_id: AccountId, attrs: PetAttrs) {
         self.update_pool();
 
         let weight = attrs.weight();
         let mut account = self.account_or_default(&account_id);
+        // Harvest first: everything earned so far was earned at the old weight.
         self.harvest(&mut account);
+        let resync = self.pets.get(&pet_id).is_some();
+        self.drop_stake_record(pet_id, &mut account);
 
         account.weight += weight;
         account.staked.push(pet_id);
@@ -325,11 +348,16 @@ impl PetStake {
             },
         );
 
+        // A re-weigh is not a new stake. Emitting `pet_staked` for both made an
+        // indexer count the same pet twice.
         self.log_event(
-            "pet_staked",
+            if resync { "pet_resynced" } else { "pet_staked" },
             json!({ "account_id": account_id, "pet_id": pet_id, "weight": U128(weight) }),
         );
 
+        // Always re-assert the lock, even on a re-weigh: `set_pet_lock` is
+        // fire-and-forget, so a lock that failed to land the first time has no
+        // other way back, and `set_locked` is idempotent.
         self.set_pet_lock(pet_id, true);
     }
 
@@ -947,6 +975,46 @@ impl PetStake {
         self.game_contract = game_contract;
     }
 
+    /// Recompute an account's weight from the pets actually on record.
+    ///
+    /// A safety valve, added because the pool had no way back. The weight
+    /// double-count that `drop_stake_record` now prevents left accounts holding
+    /// weight for pets that had already been unstaked, and no method on this
+    /// contract could take it off again — the only repair was a redeploy with
+    /// fresh state, which costs every player their stake. `self.pets` is the
+    /// authority here: it holds one record per genuinely staked pet.
+    pub fn admin_rebuild_account(&mut self, account_id: AccountId) -> U128 {
+        self.assert_owner();
+        self.update_pool();
+
+        let mut account = self.account_or_default(&account_id);
+        // Credits earned up to now were earned at the weight on record, wrong
+        // or not. Repairing the books is not a reason to claw those back.
+        self.harvest(&mut account);
+
+        let mut staked: Vec<u64> = Vec::new();
+        let mut weight: u128 = 0;
+        for (pet_id, pet) in self.pets.iter() {
+            if pet.owner_id == account_id {
+                staked.push(pet_id);
+                weight += pet.weight.0;
+            }
+        }
+
+        self.total_weight = self.total_weight.saturating_sub(account.weight) + weight;
+        account.weight = weight;
+        account.staked = staked;
+        account.reward_debt = self.accrued(&account);
+        self.accounts.insert(&account_id, &account);
+
+        self.log_event(
+            "account_rebuilt",
+            json!({ "account_id": account_id, "weight": U128(weight) }),
+        );
+
+        U128(weight)
+    }
+
     /// Escape hatch for a game contract that predates `get_pet_attrs`: an
     /// operator pushes the pet's owner and attributes instead.
     pub fn admin_set_pet(&mut self, pet_id: u64, owner_id: AccountId, attrs: PetAttrs) {
@@ -956,16 +1024,8 @@ impl PetStake {
                 existing.owner_id == owner_id,
                 "Unstake the pet before moving it to another owner"
             );
-            // Re-stake with the new weight.
-            self.update_pool();
-            let mut account = self.account_or_default(&owner_id);
-            self.harvest(&mut account);
-            account.weight = account.weight.saturating_sub(existing.weight.0);
-            self.total_weight = self.total_weight.saturating_sub(existing.weight.0);
-            account.staked.retain(|id| *id != pet_id);
-            self.accounts.insert(&owner_id, &account);
-            self.pets.remove(&pet_id);
         }
+        // `internal_stake` replaces the old weight rather than adding to it.
         self.internal_stake(pet_id, owner_id, attrs);
     }
 
@@ -1360,6 +1420,140 @@ mod tests {
         let mut contract = deploy();
         testing_env!(ctx(alice(), 10).build());
         contract.spend_credits("free_lunch".to_string(), None, U128(1));
+    }
+
+    /// The bug this pins cost a whole testnet round.
+    ///
+    /// `sync_pet` re-reads a pet after it levels up and lands back in
+    /// `on_pet_attrs`, the same callback a first stake uses. That callback added
+    /// the new weight on top of the old one, so one level-up left alice holding
+    /// 100 + 105 for a single pet, the pool holding the same 205, and `staked`
+    /// listing pet 1 twice. Unstaking then returned only the newer 105 and left
+    /// 100 units of weight earning credits for a pet that was no longer there.
+    ///
+    /// Every existing test went through `admin_set_pet`, which unwound the old
+    /// record by hand — which is exactly why none of them caught this.
+    fn resync(contract: &mut PetStake, pet_id: u64, owner: AccountId, attrs: PetAttrs) {
+        contract.on_pet_attrs(pet_id, owner.clone(), Ok((owner, attrs)));
+    }
+
+    #[test]
+    fn a_level_up_replaces_the_pets_weight_instead_of_adding_to_it() {
+        let mut contract = deploy();
+        testing_env!(ctx(owner(), 0).build());
+
+        resync(&mut contract, 1, alice(), attrs(0, 0, 1, Rarity::Common));
+        assert_eq!(contract.get_pool().total_weight.0, 100);
+
+        // Level 1: 100 * 1.05.
+        resync(&mut contract, 1, alice(), attrs(1, 0, 1, Rarity::Common));
+
+        let view = contract.get_account(alice()).unwrap();
+        assert_eq!(view.weight.0, 105, "the pet is worth 105, not 100 + 105");
+        assert_eq!(view.staked_pets, vec![1], "the pet is staked once, not twice");
+        assert_eq!(contract.get_pool().total_weight.0, 105);
+        assert_eq!(contract.get_pool().staked_pets, 1);
+    }
+
+    #[test]
+    fn unstaking_a_levelled_pet_empties_the_pool() {
+        let mut contract = deploy();
+        testing_env!(ctx(owner(), 0).build());
+
+        resync(&mut contract, 1, alice(), attrs(0, 0, 1, Rarity::Common));
+        resync(&mut contract, 1, alice(), attrs(1, 0, 1, Rarity::Common));
+        resync(&mut contract, 1, alice(), attrs(2, 0, 1, Rarity::Common));
+
+        testing_env!(ctx(alice(), EPOCH_SECONDS).build());
+        contract.unstake_pet(1);
+
+        // Nothing is staked, so nothing may still be carrying weight. Phantom
+        // weight here is not cosmetic: it keeps paying out a share of every
+        // epoch to an account that has no pet at work.
+        assert_eq!(contract.get_account(alice()).unwrap().weight.0, 0);
+        assert_eq!(contract.get_pool().total_weight.0, 0);
+        assert_eq!(contract.get_pool().staked_pets, 0);
+    }
+
+    #[test]
+    fn a_corrupted_account_can_be_rebuilt_from_the_pets_on_record() {
+        let mut contract = deploy();
+        testing_env!(ctx(owner(), 0).build());
+
+        resync(&mut contract, 1, alice(), attrs(0, 0, 1, Rarity::Common));
+        resync(&mut contract, 2, alice(), attrs(0, 0, 1, Rarity::Rare));
+
+        // Forge the damage the old double-count left behind: weight for a pet
+        // that is no longer staked, and a stale id in `staked`.
+        let mut account = contract.accounts.get(&alice()).unwrap();
+        account.weight += 500;
+        account.staked.push(99);
+        contract.accounts.insert(&alice(), &account);
+        contract.total_weight += 500;
+
+        testing_env!(ctx(owner(), 10).build());
+        let rebuilt = contract.admin_rebuild_account(alice()).0;
+
+        // 100 + 160, from the two records that really exist.
+        assert_eq!(rebuilt, 260);
+        let view = contract.get_account(alice()).unwrap();
+        assert_eq!(view.weight.0, 260);
+        assert_eq!(view.staked_pets, vec![1, 2]);
+        assert_eq!(contract.get_pool().total_weight.0, 260);
+    }
+
+    #[test]
+    fn rebuilding_keeps_what_was_already_earned() {
+        let mut contract = deploy();
+        testing_env!(ctx(owner(), 0).build());
+        resync(&mut contract, 1, alice(), attrs(0, 0, 1, Rarity::Common));
+
+        testing_env!(ctx(owner(), EPOCH_SECONDS).build());
+        let before = contract.get_account(alice()).unwrap().pending_credits.0;
+        contract.admin_rebuild_account(alice());
+        let after = contract.get_account(alice()).unwrap().pending_credits.0;
+
+        assert!(before > 0);
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only the owner can call this")]
+    fn players_cannot_rebuild_their_own_books() {
+        let mut contract = deploy();
+        testing_env!(ctx(alice(), 10).build());
+        contract.admin_rebuild_account(alice());
+    }
+
+    #[test]
+    fn a_resync_does_not_report_a_new_stake() {
+        let mut contract = deploy();
+        testing_env!(ctx(owner(), 0).build());
+
+        resync(&mut contract, 1, alice(), attrs(0, 0, 1, Rarity::Common));
+        resync(&mut contract, 1, alice(), attrs(1, 0, 1, Rarity::Common));
+
+        // Both emitted `pet_staked` before, so an indexer counted one pet as
+        // two stakes every time it levelled.
+        let logs = near_sdk::test_utils::get_logs();
+        let staked = logs.iter().filter(|l| l.contains("\"pet_staked\"")).count();
+        let resynced = logs.iter().filter(|l| l.contains("\"pet_resynced\"")).count();
+        assert_eq!(staked, 1, "logs were {logs:?}");
+        assert_eq!(resynced, 1, "logs were {logs:?}");
+    }
+
+    #[test]
+    fn a_resync_cannot_hand_the_pet_to_someone_else() {
+        let mut contract = deploy();
+        testing_env!(ctx(owner(), 0).build());
+
+        resync(&mut contract, 1, alice(), attrs(0, 0, 1, Rarity::Common));
+        // The game contract says bob owns it; alice asked. Nothing moves.
+        contract.on_pet_attrs(1, alice(), Ok((bob(), attrs(5, 0, 1, Rarity::Common))));
+
+        assert_eq!(contract.get_account(alice()).unwrap().weight.0, 100);
+        assert!(contract.get_account(bob()).is_none());
+        assert_eq!(contract.get_pool().total_weight.0, 100);
     }
 
     #[test]
