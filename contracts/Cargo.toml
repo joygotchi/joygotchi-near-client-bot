@@ -9,7 +9,9 @@ license = "MIT"
 repository = "https://github.com/kurodenjiro/joygotchi-near-client-bot"
 
 [workspace.dependencies]
-near-sdk = "5.30"
+# `default` is just ["wee_alloc"], an unmaintained allocator that
+# Dependabot flags as critical. Nothing here needs it.
+near-sdk = { version = "5.30", default-features = false }
 near-contract-standards = "5.30"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
