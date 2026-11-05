@@ -1,17 +1,27 @@
 #!/usr/bin/env bash
 # Deploy all three contracts to testnet and wire them together.
 #
-#   ./deploy-testnet.sh <suffix>
+#   ./deploy-testnet.sh <suffix> [oracle-account]
 #
 # Expects three accounts to exist already, each with ~10 NEAR:
 #   jg-game-<suffix>.testnet  jg-stake-<suffix>.testnet  jg-mint-<suffix>.testnet
+#
+# `oracle-account` is the account whose key the AI backend signs
+# `award_feed_xp` with, so a feed raises the pet's XP on chain. Left out, the
+# oracle starts as the staking contract's owner and `set_oracle` names it
+# later. See "The feed-XP oracle" in README.md for how to make its key.
+#
+# This re-initialises state. To upgrade a deployment that is already live, use
+# ./migrate-testnet.sh instead — `new` cannot run twice, and a redeploy with
+# fresh state costs every player their staked pet and their credit balance.
 #
 # Create them with:
 #   near account create-account sponsor-by-faucet-service jg-game-<suffix>.testnet \
 #     autogenerate-new-keypair save-to-keychain network-config testnet create
 set -euo pipefail
 
-SUF="${1:?usage: ./deploy-testnet.sh <suffix>}"
+SUF="${1:?usage: ./deploy-testnet.sh <suffix> [oracle-account]}"
+ORACLE="${2:-}"
 cd "$(dirname "$0")"
 
 GAME="jg-game-$SUF.testnet"
@@ -46,7 +56,7 @@ deploy "$GAME"  res/game.wasm \
   "{\"owner_id\":\"$GAME\",\"stake_contract\":\"$STAKE\",\"mint_router\":\"$MINT\",\"treasury\":\"$MINT\",\"mint_price\":\"$MINT_PRICE\"}"
 
 deploy "$STAKE" res/pet_stake.wasm \
-  "{\"owner_id\":\"$STAKE\",\"game_contract\":\"$GAME\",\"granter\":\"$MINT\",\"epoch_budget\":\"$EPOCH_BUDGET\"}"
+  "{\"owner_id\":\"$STAKE\",\"game_contract\":\"$GAME\",\"granter\":\"$MINT\",\"epoch_budget\":\"$EPOCH_BUDGET\",\"oracle\":$([ -n "$ORACLE" ] && echo "\"$ORACLE\"" || echo null)}"
 
 deploy "$MINT"  res/mint_router.wasm \
   "{\"owner_id\":\"$MINT\",\"game_contract\":\"$GAME\",\"stake_contract\":\"$STAKE\",\"wnear\":\"$WNEAR\",\"treasury\":\"$MINT\",\"mint_price\":\"$MINT_PRICE\",\"near_per_credit\":\"$NEAR_PER_CREDIT\"}"
@@ -63,3 +73,4 @@ echo
 echo "GAME  = $GAME"
 echo "STAKE = $STAKE"
 echo "MINT  = $MINT"
+[ -n "$ORACLE" ] && echo "ORACLE = $ORACLE" || true

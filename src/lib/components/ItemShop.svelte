@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { AiFeedResult } from '#lib/ai/client';
+  import { feedSummary, type AiFeedResult } from '#lib/ai/client';
   import CreditItemShop from './CreditItemShop.svelte';
   import { performAiAction } from '#lib/economy/actions';
   import { SINKS, formatCredits } from '#lib/economy/params';
@@ -42,10 +42,12 @@
         pendingCredits: claimable
       });
       lastMeal = result;
-      notify('success');
-      toastSuccess(
-        `+${result.xpGained} XP (${result.xpMultiplier}x${result.lensApplied ? ', lens' : ''})`
-      );
+      notify(result.xpAwarded ? 'success' : 'error');
+      if (result.xpAwarded) {
+        toastSuccess(feedSummary(result));
+      } else {
+        toastError(feedSummary(result));
+      }
     } catch (error) {
       notify('error');
       toastError(error instanceof Error ? error.message : String(error));

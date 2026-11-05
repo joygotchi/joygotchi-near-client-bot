@@ -181,6 +181,49 @@ stake.report_battle(winner_pet_id, winner_id, loser_pet_id, loser_id) -> BattleO
 
 The client already respects both, but only the contract can enforce them.
 
+### The feed-XP oracle
+
+`game::award_xp` accepts only the staking contract or the game owner, so XP has
+to arrive through `pet-stake::award_feed_xp`, which forwards it:
+
+```rust
+pub fn award_feed_xp(&mut self, pet_id: u64, xp: u32) -> Promise;  // oracle or owner
+pub fn set_oracle(&mut self, oracle: AccountId);                   // owner
+```
+
+The XP cannot be awarded inside `spend_credits`: the taste multiplier is only
+known after NEAR AI has judged the meal, which happens off-chain once the
+credits are already debited. So the backend verifies the `spend_credits`
+receipt, runs the inference, and reports the result here.
+
+`xp` is clamped to `MAX_FEED_XP` (72 — one perfect feed with a Focus Lens)
+rather than trusted. The caller is a server, and `game::award_xp`'s own clamp
+of 500 is seven feeds' worth: wide enough for a compromised backend to take a
+pet five levels in five calls.
+
+The key the backend signs with is a **function-call** access key, not a
+full-access one. Making it, for an oracle account that already exists:
+
+```bash
+near account add-key oracle.jg-stake-5656.testnet grant-function-call-access   --allowance '0.25 NEAR'   --contract-account-id jg-stake-5656.testnet   --function-names 'award_feed_xp'   use-manually-provided-public-key ed25519:...   network-config testnet sign-with-keychain send
+```
+
+Then `NEAR_ORACLE_ACCOUNT_ID` and `NEAR_ORACLE_PRIVATE_KEY` in `.env`, and
+`set_oracle` so the contract agrees. The restriction is enforced by the chain,
+not by the backend — the key is refused for anything else before it reaches a
+contract at all:
+
+```
+jg-stake::claim_faucet   InvalidAccessKeyError::MethodNameMismatch
+jg-stake::set_oracle     InvalidAccessKeyError::MethodNameMismatch
+jg-game::award_xp        InvalidAccessKeyError::ReceiverMismatch
+```
+
+Two things to know about the allowance: it is spent on gas, so the key stops
+working once it runs out (re-add it to top up), and leaving it off makes it
+unlimited, which caps the damage from a leak at the oracle account's balance
+instead. Either way the account wants a small balance and nothing else on it.
+
 ## mint-router — multichain mints
 
 Receives wNEAR from 1Click and turns it into a pet or into $JOY.
@@ -245,7 +288,7 @@ the old struct around to deserialise with.
 ## Testnet
 
 ```bash
-./deploy-testnet.sh <suffix>
+./deploy-testnet.sh <suffix> [oracle-account]
 ```
 
 Creates nothing — it expects three faucet-funded accounts to exist already and
@@ -253,6 +296,16 @@ deploys into them. The account names are known up front, so the three init
 calls can reference each other without a bootstrap step. The last live run and
 what it proved are recorded in
 [../docs/GAME_CONTRACT_V2.md](../docs/GAME_CONTRACT_V2.md).
+
+That script runs `new`, which re-initialises state. To upgrade a deployment
+that is already live:
+
+```bash
+./migrate-testnet.sh <suffix> <oracle-account>
+```
+
+which deploys and calls `migrate` in one transaction, keeping every staked pet,
+credit balance, inventory and listing.
 
 ## Deploying
 

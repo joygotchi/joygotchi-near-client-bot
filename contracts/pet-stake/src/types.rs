@@ -82,6 +82,16 @@ pub const WARD_SECONDS: u64 = 24 * 60 * 60;
 pub const WOUND_SECONDS: u64 = 6 * 60 * 60;
 pub const LENS_FEEDS: u8 = 10;
 
+/// The most XP one AI feed can ever be worth.
+///
+/// `feedXp` in src/lib/economy/params.ts is `35 x (1 + match*0.8 + lens*0.25)`,
+/// which peaks at 72 for a perfect match with a Focus Lens. The cap is that
+/// peak and nothing more, so the number needs no separate justification: one
+/// call to `award_feed_xp` can be worth at most one perfect feed. The game
+/// contract's own clamp is 500 — wide enough for a compromised backend to take
+/// a pet from level 0 to level 5 in five calls, which is the gap this closes.
+pub const MAX_FEED_XP: u32 = 72;
+
 /// How long between mining claims.
 pub const MINING_COOLDOWN_SECONDS: u64 = 6 * 60 * 60;
 
