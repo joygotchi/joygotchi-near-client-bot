@@ -191,6 +191,33 @@ The payment arrives from a bridge, not from the player's wallet, so the router
 has to be able to assign a pet to somebody other than the caller. It must also
 be set as `granter` on `pet-stake` for `buy_credits` to work.
 
+## Known issue: panic messages are invisible on-chain
+
+`require!`, `.expect()` and `env::panic_str` all surface as
+`WebAssembly trap: An 'unreachable' opcode was executed`, with no message.
+Confirmed at the RPC against a deployed hash matching the local build;
+`panic = "abort"` is not the cause.
+
+`cargo near build` refuses this toolchain's output with
+`Failed to validate wasm: error validating input`, so the cause is most likely
+Rust 1.97 emitting wasm features the NEAR VM rejects rather than anything in
+the contracts. Happy paths are unaffected.
+
+Before mainnet: pin `rust-toolchain.toml` to a version `cargo near build`
+accepts and build through it.
+
+## Testnet
+
+```bash
+./deploy-testnet.sh <suffix>
+```
+
+Creates nothing — it expects three faucet-funded accounts to exist already and
+deploys into them. The account names are known up front, so the three init
+calls can reference each other without a bootstrap step. The last live run and
+what it proved are recorded in
+[../docs/GAME_CONTRACT_V2.md](../docs/GAME_CONTRACT_V2.md).
+
 ## Deploying
 
 ```bash

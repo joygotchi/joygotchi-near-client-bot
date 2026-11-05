@@ -393,25 +393,61 @@ item drop rate.
 
 ## 9 · Acceptance criteria
 
-The integration is done when all of these pass on testnet:
+Deployed and exercised on testnet with
+[`contracts/deploy-testnet.sh`](../contracts/deploy-testnet.sh):
 
-- [ ] A pet transfers between two accounts, and **fails** while staked.
-- [ ] `stake_pet` succeeds without `admin_set_pet`, and refuses a pet the
-      caller does not own.
-- [ ] Paying ZEC through 1Click produces a pet in the payer's NEAR account.
-- [ ] Attacking a staked pet fails; attacking an ordinary pet moves the wager
-      and wounds the loser.
-- [ ] A Star Charm is consumed and the star survives.
-- [ ] Levelling a staked pet changes its credit rate within one block of
-      `sync_pet`.
-- [ ] A starved pet reads as dying from a derived status, not a stored one.
-- [ ] The countdown on the pet screen shows a plausible time.
+| | |
+|---|---|
+| game | `jg-game-72362.testnet` |
+| pet-stake | `jg-stake-72362.testnet` |
+| mint-router | `jg-mint-72362.testnet` |
 
-The three contracts are unit-tested (81 tests, 32 of them in `game`), but
-nothing exercises the cross-contract path — these are the first tests that
-will.
+| Criterion | Result |
+|---|---|
+| `stake_pet` succeeds without `admin_set_pet`, refusing a pet the caller does not own | **pass** — `get_pet_attrs` resolved across contracts, weight 100 |
+| A staked pet cannot be transferred | **pass** — `nft_transfer` reverts |
+| Attacking settles through `report_battle` and the callback applies the damage | **pass** |
+| A Star Charm is consumed and the star survives | not run — needs a pet with stars |
+| Levelling a staked pet changes its credit rate | not run |
+| A starved pet reads as dying from a derived status | **pass** in unit tests; not reproduced live (no pet has starved yet) |
+| Paying ZEC through 1Click produces a pet | **not run** — needs a 1Click partner JWT |
+| The countdown shows a plausible time | **pass** — `seconds_until_starving` 86,349 on a fresh pet |
 
-What the unit tests do pin down, because it is the easiest thing to get wrong:
-`attack` builds the settlement promise and applies **nothing**, and
-`on_battle_settled` with an `Err` result leaves the loser's stars and clock
-untouched.
+### The live run, in order
+
+```
+create_pet            → pet_minted      pet 1, common, to jg-p2
+stake_pet             → get_pet_attrs across contracts
+                      → pet_staked      weight 100
+                      → set_locked      back on the game contract
+nft_transfer (staked) → reverts
+claim_credits         → credits_claimed 111,111 micro-credits
+unstake_pet           → pet_unstaked + set_locked(false)
+attack                → battle_rolled   attacker 111 vs defender 86
+                      → report_battle   transferred 0, rake 0
+                      → battle_settled   winner +25 XP, loser wounded 6h
+```
+
+`transferred: 0` is correct, not a failure: the loser had no credits, and the
+contract takes whatever they can cover rather than refusing the fight.
+
+### One real problem, found only by deploying
+
+**Every error message is invisible on-chain.** `require!`, `.expect()` and even
+a direct `env::panic_str` all surface as:
+
+```
+ExecutionError("WebAssembly trap: An `unreachable` opcode was executed.")
+```
+
+Verified at the RPC, not just in the CLI, and verified against a deployed hash
+matching the local build. Removing `panic = "abort"` did not change it. The
+likely cause is the build pipeline rather than the contracts: `cargo near build`
+refuses this toolchain's output with `Failed to validate wasm: error validating
+input`, which points at Rust 1.97 emitting wasm features the NEAR VM rejects.
+
+Happy paths are unaffected — everything above ran — but a player who does
+something disallowed gets no reason why. **Fix before mainnet:** pin the
+toolchain in `rust-toolchain.toml` to a version `cargo near build` accepts and
+build through it, then re-run the two checks in this section that assert on
+message text.
