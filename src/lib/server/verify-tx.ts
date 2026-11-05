@@ -1,4 +1,5 @@
 import { RPC_URL, STAKE_CONTRACT } from '#lib/config';
+import { receiptStore } from './receipt-store';
 
 /**
  * Verifies on-chain that a player really paid for an AI action, so the NEAR AI
@@ -27,20 +28,9 @@ export type SpendReceipt = {
 };
 
 /**
- * Replay guard. In-memory is enough for a single serverless instance and for
- * local development; point this at Redis / Vercel KV before going to
- * production, or an attacker with two concurrent requests can reuse one receipt.
+ * Each receipt is claimed exactly once, through storage shared by every
+ * instance — see `receipt-store.ts` for why a `Map` could not do this job.
  */
-const seen = new Map<string, number>();
-const SEEN_TTL_MS = 30 * 60_000;
-
-function remember(txHash: string): boolean {
-  const now = Date.now();
-  for (const [hash, at] of seen) if (now - at > SEEN_TTL_MS) seen.delete(hash);
-  if (seen.has(txHash)) return false;
-  seen.set(txHash, now);
-  return true;
-}
 
 type TxStatus = {
   transaction: { signer_id: string; receiver_id: string; actions: unknown[] };
@@ -90,7 +80,11 @@ export async function verifySpendReceipt(input: {
 }): Promise<SpendReceipt> {
   const { txHash, accountId, action } = input;
 
-  if (!remember(txHash)) {
+  // Claim the receipt before looking it up. An atomic set-if-absent is what
+  // makes "one payment, one inference" true across concurrent requests and
+  // across serverless instances.
+  const store = receiptStore();
+  if (!(await store.claim(txHash))) {
     throw new ReceiptError('This payment receipt was already used');
   }
 
@@ -107,7 +101,9 @@ export async function verifySpendReceipt(input: {
 
   const body = (await response.json()) as { result?: TxStatus; error?: { message?: string } };
   if (body.error || !body.result) {
-    seen.delete(txHash);
+    // Nothing was consumed, so hand the claim back rather than burning a valid
+    // receipt on a transaction the RPC simply has not caught up with.
+    await store.release(txHash);
     throw new ReceiptError(`Could not find transaction ${txHash}`);
   }
 

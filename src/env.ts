@@ -93,6 +93,26 @@ export const variables = defineEnvVars({
     description: 'Intents account that receives ONECLICK_FEE_BPS. Required if the fee is > 0.'
   },
 
+  // ── Private: replay guard storage ───────────────────────────────────────────
+  KV_REST_API_URL: {
+    schema: optional(),
+    description:
+      'Upstash / Vercel KV REST endpoint. Holds one-shot claims on AI payment ' +
+      'receipts, which is what makes "one payment, one inference" hold across ' +
+      'serverless instances. Vercel KV sets this automatically.'
+  },
+  KV_REST_API_TOKEN: {
+    schema: optional(),
+    description: 'Token for KV_REST_API_URL. Server-only.'
+  },
+  ALLOW_INSECURE_REPLAY_GUARD: {
+    schema: withDefault('false'),
+    description:
+      'Set to "true" to run in production without KV. One payment can then buy ' +
+      'more than one inference, because receipts are only deduplicated per ' +
+      'instance. Off by default, and the AI endpoint refuses to run instead.'
+  },
+
   // ── Private: NEAR AI Cloud ──────────────────────────────────────────────────
   NEAR_AI_API_KEY: {
     schema: optional(),

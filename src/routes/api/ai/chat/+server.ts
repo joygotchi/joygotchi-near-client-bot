@@ -3,6 +3,7 @@ import { NEAR_AI_API_KEY, NEAR_AI_BASE_URL, NEAR_AI_MODEL } from '$app/env/priva
 import type { RequestHandler } from './$types';
 import { buildTask, extractJson, type PetContext } from '#lib/ai/prompts';
 import { feedXp, LENS_BONUS, SINKS, type CreditAction } from '#lib/economy/params';
+import { ReplayGuardUnavailableError } from '#lib/server/receipt-store';
 import { ReceiptError, verifySpendReceipt } from '#lib/server/verify-tx';
 
 const AI_ACTIONS: CreditAction[] = ['ai_feed', 'train', 'craft_item', 'chat'];
@@ -45,6 +46,9 @@ export const POST: RequestHandler = async ({ request }) => {
     lensApplied = receipt.lensApplied;
   } catch (err) {
     if (err instanceof ReceiptError) error(402, err.message);
+    // Refusing is the point: a guard that cannot deduplicate receipts would let
+    // one payment buy unlimited inference on this server's NEAR AI key.
+    if (err instanceof ReplayGuardUnavailableError) error(503, err.message);
     throw err;
   }
 

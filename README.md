@@ -197,6 +197,10 @@ The client reads both the v1 and v2 pet shapes, so it works before and after
 the migration — see the table on `Pet` in
 [src/lib/game/pets.ts](src/lib/game/pets.ts).
 
-Smaller things, in priority order: the `/api/ai/chat` replay guard is in-memory
-and needs Redis or Vercel KV before production; auto-feed has an on-chain
-budget and nothing that spends it; there is no CI.
+`/api/ai/chat` needs `KV_REST_API_URL` and `KV_REST_API_TOKEN` in production, or
+it refuses to run — a receipt may buy exactly one inference, and enforcing that
+across serverless instances needs shared storage. `ALLOW_INSECURE_REPLAY_GUARD`
+opts out explicitly.
+
+Smaller things: auto-feed has an on-chain budget and nothing that spends it, and
+there is no CI.
