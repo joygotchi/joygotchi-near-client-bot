@@ -36,6 +36,23 @@ the five design decisions taken along the way.
 | `get_pet` / `get_all_pet_metadata` / `get_pets_for_owner` | view | status is derived, not stored |
 | NEP-171 core, enumeration, approval | | `token_id` is the decimal `pet_id` |
 
+### Marketplace
+
+Pets sell for NEAR, with a 2.5% fee to the treasury.
+
+| Method | Who |
+|---|---|
+| `list_pet(pet_id, price)` | owner, 1 yocto |
+| `unlist_pet(pet_id)` | seller, 1 yocto |
+| `buy_pet(pet_id)` | anyone, payable; change is returned |
+| `get_pet_listing(id)` / `get_pet_listings(…)` | view |
+| `set_market_fee_bps` / `set_treasury` | owner |
+
+Listings live here rather than in a separate marketplace contract because this
+contract already owns transfers and the staking lock — a sale is one atomic
+call, with no window for a pet to be staked between listing and purchase.
+Staking or transferring a listed pet clears the listing.
+
 ### Stars
 
 Earned nowhere else: three consecutive wins is one star, a single defeat takes

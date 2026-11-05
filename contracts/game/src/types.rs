@@ -134,6 +134,10 @@ pub struct Pet {
     pub locked: bool,
 }
 
+/// Default marketplace fee, in basis points. Goes to the treasury, which is
+/// what gets staked with NEAR AI — so trading volume feeds the credit stream.
+pub const DEFAULT_MARKET_FEE_BPS: u16 = 250;
+
 impl Pet {
     pub fn attrs(&self) -> PetAttrs {
         PetAttrs {
@@ -209,9 +213,27 @@ pub struct PetView {
     /// Wins still needed for the next star, or `null` at `MAX_STAR`.
     pub wins_to_next_star: Option<u32>,
     pub locked: bool,
+    /// Asking price in yoctoNEAR while the pet is for sale.
+    pub listed_price: Option<U128>,
     pub born_at: U64,
     pub last_attack_used: U64,
     pub last_attacked: U64,
+}
+
+/// A pet offered for sale.
+///
+/// Pets are priced in NEAR, not credits. Credits are what you earn by playing
+/// and they are deliberately not transferable; a pet is an asset bought with
+/// money, and giving it a resale price is what turns minting from a one-way
+/// purchase into something a player can get out of.
+#[near(serializers = [json, borsh])]
+#[derive(Clone, Debug)]
+pub struct PetListing {
+    pub pet_id: u64,
+    pub seller_id: AccountId,
+    /// Price in yoctoNEAR.
+    pub price: U128,
+    pub listed_at: U64,
 }
 
 /// An item in the game contract's own shop, priced in yoctoNEAR.

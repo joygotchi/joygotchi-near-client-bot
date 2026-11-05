@@ -1,4 +1,5 @@
-import { GAME_CONTRACT, GAS } from '#lib/config';
+import { GAME_CONTRACT, GAS, ONE_YOCTO } from '#lib/config';
+import { parseNear } from '#lib/near/amount';
 import { viewFunction } from '#lib/near/rpc';
 import { callAndDecode, callFunction } from '#lib/near/tx';
 
@@ -53,6 +54,8 @@ export type Pet = {
   win_streak?: number;
   /** v2 only: wins still needed for the next star, `null` at the cap. */
   wins_to_next_star?: number | null;
+  /** v2 only: asking price in yoctoNEAR while the pet is for sale. */
+  listed_price?: string | null;
   /** v2 only: true while the pet is staked. */
   locked?: boolean;
   /**
@@ -102,6 +105,15 @@ export const PET_SPECIES = [
 
 /** Evolution phase, under either contract's field name. */
 export const evolutionPhase = (pet: Pet) => pet.evolution_phase ?? pet.pet_evolution_phase ?? 1;
+
+/** A pet offered for sale, from `get_pet_listings`. */
+export type PetListing = {
+  pet_id: number;
+  seller_id: string;
+  /** Price in yoctoNEAR. */
+  price: string;
+  listed_at: string;
+};
 
 export const petImage = (pet: Pet) =>
   `/assets/animation/${pet.category}/${evolutionPhase(pet)}.gif`;
@@ -183,6 +195,45 @@ export const createPet = (name: string, metadata: { title: string; description: 
 
 export const renamePet = (petId: number, name: string) =>
   callFunction(GAME_CONTRACT, 'change_name_pet', { pet_id: petId, name });
+
+// ── Marketplace ──────────────────────────────────────────────────────────────
+
+/**
+ * Offer a pet for sale, priced in NEAR.
+ *
+ * Listings live in the game contract rather than a separate marketplace, so a
+ * sale is atomic with the transfer — there is no window in which a pet gets
+ * staked between being listed and being bought.
+ */
+export const listPet = (petId: number, priceNear: string) =>
+  callFunction(
+    GAME_CONTRACT,
+    'list_pet',
+    { pet_id: petId, price: parseNear(priceNear) },
+    { gas: GAS.heavy, deposit: ONE_YOCTO }
+  );
+
+export const unlistPet = (petId: number) =>
+  callFunction(GAME_CONTRACT, 'unlist_pet', { pet_id: petId }, { deposit: ONE_YOCTO });
+
+/** Buy a listed pet. Overpayment comes back as change. */
+export const buyPet = (petId: number, priceYocto: string) =>
+  callFunction(GAME_CONTRACT, 'buy_pet', { pet_id: petId }, { gas: GAS.heavy, deposit: priceYocto });
+
+export async function getPetListings(fetchImpl: typeof fetch = fetch): Promise<PetListing[]> {
+  try {
+    return (
+      (await viewFunction<PetListing[]>(
+        GAME_CONTRACT,
+        'get_pet_listings',
+        { from_index: 0, limit: 100 },
+        fetchImpl
+      )) ?? []
+    );
+  } catch {
+    return [];
+  }
+}
 
 /** The game contract's own shop. Not surfaced until it is priced in NEAR. */
 export const buyItem = (petId: number, itemId: number) =>

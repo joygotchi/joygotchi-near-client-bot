@@ -43,7 +43,7 @@ call() {
 # The account names are known up front, so the three init calls can reference
 # each other without a bootstrap step.
 deploy "$GAME"  res/game.wasm \
-  "{\"owner_id\":\"$GAME\",\"stake_contract\":\"$STAKE\",\"mint_router\":\"$MINT\",\"mint_price\":\"$MINT_PRICE\"}"
+  "{\"owner_id\":\"$GAME\",\"stake_contract\":\"$STAKE\",\"mint_router\":\"$MINT\",\"treasury\":\"$MINT\",\"mint_price\":\"$MINT_PRICE\"}"
 
 deploy "$STAKE" res/pet_stake.wasm \
   "{\"owner_id\":\"$STAKE\",\"game_contract\":\"$GAME\",\"granter\":\"$MINT\",\"epoch_budget\":\"$EPOCH_BUDGET\"}"

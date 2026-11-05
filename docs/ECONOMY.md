@@ -340,6 +340,26 @@ Randomness comes from the block's random seed. Good enough for loot; a validator
 could in principle influence it, so nothing of real value should ever hang on a
 single roll.
 
+## Selling a pet
+
+Pets sell for **NEAR**, not credits. Credits are what you earn by playing and
+are deliberately not transferable; a pet is an asset bought with money, so it
+has a resale price.
+
+That matters beyond convenience. Without it, minting is a one-way purchase and
+nobody can recover any value, which caps what a pet is worth to a buyer at
+"entertainment value" rather than "asset value" — and since mint revenue is what
+funds `epoch_budget`, that cap propagates straight into the credit stream.
+
+A 2.5% fee goes to the treasury, which is what gets staked with NEAR AI, so
+trading volume feeds the credit stream too.
+
+Listings live in the game contract rather than a separate marketplace. It
+already owns transfers and the staking lock, so a sale is one atomic call: there
+is no window in which a pet gets staked between being listed and being bought,
+and no escrow hop to go wrong. Staking a listed pet, or transferring it out of
+band, removes the listing — a buyer should never be sold a pet they cannot move.
+
 ## Mining
 
 Mining pays **0.005 credit every 6 hours** and requires a pet staked in the AI
@@ -410,7 +430,8 @@ telling the player what something will cost before they sign.
 | `near_per_credit` | 0.5 NEAR | treasury, `mint-router::set_near_per_credit` |
 | mining | 0.005 ACR / 6h | treasury, `set_mining_reward` |
 | drop curve | 2%–25%, +1bp per weight | fixed in `drop_odds` |
-| market rake | 500 bps (5%, capped at 20%) | treasury, `set_market_rake_bps` |
+| item market rake | 500 bps (5%, capped at 20%) | treasury, `set_market_rake_bps` |
+| pet market fee | 250 bps (2.5%, capped at 10%) | treasury, `game::set_market_fee_bps` |
 | `faucet_amount` | 0.01 ACR, once per account | treasury, `set_faucet_amount` |
 | `battle_wager` | 0.01 ACR | treasury, `set_battle_params` |
 | `battle_rake_bps` | 500 (5%, capped at 20%) | treasury, `set_battle_params` |
@@ -433,11 +454,10 @@ Written down because they are real, not because they are solved:
   contract directly, and no battle settles any credits.
 - **Auto-feed is budgeted but still not executed.** The budget is stored
   on-chain and nothing spends it yet.
-- **Pets are not transferable at all.** `game.joyv1.near` is not NEP-171 — it
-  has no `nft_token`, `nft_transfer` or `nft_approve` (verified against mainnet).
-  So there is no marketplace and no exit liquidity: minting is a one-way
-  purchase, which caps what anyone will pay for a pet, which caps the mint
-  revenue that funds `epoch_budget`.
+- **Pets still cannot be traded on the deployed contract.** `game.joyv1.near`
+  is not NEP-171 — no `nft_token`, `nft_transfer` or `nft_approve` (verified
+  against mainnet). The v2 contract is, and carries its own marketplace, so
+  this closes the moment v2 is deployed.
 - **Nobody has ever battled.** Of the 20 pets on mainnet, zero have ever
   attacked or been attacked, and none is above level 1. The wager above is the
   first reason to fight that the game has had; whether it is enough is untested.

@@ -47,6 +47,7 @@ enum StorageKey {
     Approval,
     Pets,
     Shop,
+    Listings,
 }
 
 /// What this contract needs from the staking contract.
@@ -92,6 +93,14 @@ pub struct Game {
 
     /// What `create_pet` costs, in yoctoNEAR.
     mint_price: u128,
+
+    /// Pets for sale, priced in NEAR.
+    listings: UnorderedMap<u64, PetListing>,
+    /// Marketplace cut, in basis points, paid to the treasury.
+    market_fee_bps: u16,
+    /// Where mint revenue and marketplace fees go.
+    treasury: AccountId,
+
     paused: bool,
 }
 
@@ -102,6 +111,7 @@ impl Game {
         owner_id: AccountId,
         stake_contract: AccountId,
         mint_router: AccountId,
+        treasury: AccountId,
         mint_price: U128,
     ) -> Self {
         let metadata = NFTContractMetadata {
@@ -132,6 +142,9 @@ impl Game {
             shop: LookupMap::new(StorageKey::Shop),
             shop_ids: Vec::new(),
             mint_price: mint_price.0,
+            listings: UnorderedMap::new(StorageKey::Listings),
+            market_fee_bps: DEFAULT_MARKET_FEE_BPS,
+            treasury,
             paused: false,
         };
 
@@ -473,6 +486,146 @@ impl Game {
         self.sync_weight(&pet);
     }
 
+    // ── Marketplace ──────────────────────────────────────────────────────────
+
+    /// Offer a pet for sale, priced in NEAR.
+    ///
+    /// Listings live here rather than in a separate marketplace contract on
+    /// purpose. This contract already owns transfers and the staking lock, so a
+    /// sale is one atomic call — there is no window in which a pet gets staked
+    /// between being listed and being bought, and no escrow hop to go wrong.
+    #[payable]
+    pub fn list_pet(&mut self, pet_id: u64, price: U128) {
+        self.assert_running();
+        require!(
+            env::attached_deposit() >= NearToken::from_yoctonear(1),
+            "Attach 1 yoctoNEAR"
+        );
+        require!(price.0 > 0, "Set a price");
+
+        let pet = self.expect_pet(pet_id);
+        self.assert_pet_owner(&pet);
+        require!(
+            !pet.locked,
+            "This pet is at work in the AI Lab — unstake it before selling"
+        );
+
+        self.listings.insert(
+            &pet_id,
+            &PetListing {
+                pet_id,
+                seller_id: pet.owner_id.clone(),
+                price,
+                listed_at: U64(env::block_timestamp()),
+            },
+        );
+
+        self.log_event(
+            "pet_listed",
+            json!({ "pet_id": pet_id, "seller_id": pet.owner_id, "price": price }),
+        );
+    }
+
+    #[payable]
+    pub fn unlist_pet(&mut self, pet_id: u64) {
+        require!(
+            env::attached_deposit() >= NearToken::from_yoctonear(1),
+            "Attach 1 yoctoNEAR"
+        );
+        let listing = self.listings.get(&pet_id).expect("That pet is not for sale");
+        require!(
+            listing.seller_id == env::predecessor_account_id(),
+            "That listing is not yours"
+        );
+        self.internal_unlist(pet_id, "unlisted");
+    }
+
+    fn internal_unlist(&mut self, pet_id: u64, reason: &str) {
+        if self.listings.remove(&pet_id).is_some() {
+            self.log_event("pet_unlisted", json!({ "pet_id": pet_id, "reason": reason }));
+        }
+    }
+
+    /// Buy a listed pet. The deposit must cover the price; change is returned.
+    #[payable]
+    pub fn buy_pet(&mut self, pet_id: u64) -> Promise {
+        self.assert_running();
+
+        let listing = self.listings.get(&pet_id).expect("That pet is not for sale");
+        let buyer_id = env::predecessor_account_id();
+        require!(listing.seller_id != buyer_id, "That listing is yours");
+
+        let paid = env::attached_deposit().as_yoctonear();
+        require!(paid >= listing.price.0, "Attach at least the asking price");
+
+        let mut pet = self.expect_pet(pet_id);
+        // Nothing should be able to lock a pet between listing and sale, but a
+        // sale is irreversible, so check rather than assume.
+        require!(!pet.locked, "This pet is at work in the AI Lab");
+
+        let fee = listing.price.0 * self.market_fee_bps as u128 / 10_000;
+        let to_seller = listing.price.0 - fee;
+        let change = paid - listing.price.0;
+
+        // Move the token and the game's own owner field together.
+        self.tokens.internal_transfer_unguarded(
+            &pet_id.to_string(),
+            &listing.seller_id,
+            &buyer_id,
+        );
+        pet.owner_id = buyer_id.clone();
+        self.pets.insert(&pet_id, &pet);
+        self.listings.remove(&pet_id);
+
+        self.log_event(
+            "pet_sold",
+            json!({
+                "pet_id": pet_id,
+                "seller_id": listing.seller_id,
+                "buyer_id": buyer_id,
+                "price": listing.price,
+                "fee": U128(fee),
+            }),
+        );
+
+        // The fee funds the treasury, which is what gets staked with NEAR AI —
+        // so trading volume feeds the credit stream too.
+        let mut payout = Promise::new(listing.seller_id.clone())
+            .transfer(NearToken::from_yoctonear(to_seller));
+        if fee > 0 {
+            payout = payout
+                .then(Promise::new(self.treasury.clone()).transfer(NearToken::from_yoctonear(fee)));
+        }
+        if change > 0 {
+            payout =
+                payout.then(Promise::new(buyer_id).transfer(NearToken::from_yoctonear(change)));
+        }
+        payout
+    }
+
+    pub fn get_pet_listing(&self, pet_id: u64) -> Option<PetListing> {
+        self.listings.get(&pet_id)
+    }
+
+    pub fn get_pet_listings(&self, from_index: Option<u64>, limit: Option<u64>) -> Vec<PetListing> {
+        self.listings
+            .values()
+            .skip(from_index.unwrap_or(0) as usize)
+            .take(limit.unwrap_or(50) as usize)
+            .collect()
+    }
+
+    pub fn set_market_fee_bps(&mut self, fee_bps: u16) {
+        self.assert_owner();
+        require!(fee_bps <= 1_000, "Fee cannot exceed 10%");
+        self.market_fee_bps = fee_bps;
+    }
+
+    pub fn set_treasury(&mut self, treasury: AccountId) {
+        self.assert_owner();
+        self.treasury = treasury;
+    }
+
     // ── Battle ───────────────────────────────────────────────────────────────
 
     /// Attack another pet.
@@ -659,6 +812,13 @@ impl Game {
         let mut pet = self.expect_pet(pet_id);
         pet.locked = locked;
         self.pets.insert(&pet_id, &pet);
+
+        // A pet that goes to work stops being for sale. Leaving the listing up
+        // would sell a buyer something they cannot use or move.
+        if locked {
+            self.internal_unlist(pet_id, "staked");
+        }
+
         self.log_event("pet_lock_changed", json!({ "pet_id": pet_id, "locked": locked }));
     }
 
@@ -708,6 +868,7 @@ impl Game {
             seconds_until_starving: U64(pet.starves_at.saturating_sub(now) / NANOS_PER_SECOND),
             status: pet.status(now),
             shield: pet.shield,
+            listed_price: self.listings.get(&pet.pet_id).map(|l| l.price),
             win_streak: pet.win_streak,
             wins_to_next_star: if pet.star >= MAX_STAR {
                 None
@@ -760,6 +921,8 @@ impl Game {
             "stake_contract": self.stake_contract,
             "mint_router": self.mint_router,
             "mint_price": U128(self.mint_price),
+            "market_fee_bps": self.market_fee_bps,
+            "treasury": self.treasury,
             "categories": CATEGORIES,
             "total_pets": self.pets.len(),
             "paused": self.paused,
@@ -887,6 +1050,8 @@ impl Game {
             pet.owner_id = receiver_id;
             self.pets.insert(&pet_id, &pet);
         }
+        // Moving a pet out of band ends any sale of it.
+        self.internal_unlist(pet_id, "transferred");
     }
 
     #[payable]
@@ -1047,9 +1212,13 @@ mod tests {
         builder
     }
 
+    fn treasury() -> AccountId {
+        "treasury.near".parse().unwrap()
+    }
+
     fn deploy() -> Game {
         testing_env!(ctx(owner(), 0, 0).build());
-        Game::new(owner(), stake(), router(), U128(2 * ONE_NEAR))
+        Game::new(owner(), stake(), router(), treasury(), U128(2 * ONE_NEAR))
     }
 
     /// Mint a pet for `who` without going through the payable entry point.
@@ -1588,6 +1757,148 @@ mod tests {
         assert_eq!(pet.evolution_phase, 2);
         // The attributes pet-stake re-reads reflect it.
         assert_eq!(contract.get_pet_attrs(pet_id).1.evolution_phase, 2);
+    }
+
+    // ── Marketplace ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_pet_sells_for_near_and_the_treasury_takes_its_cut() {
+        let mut contract = deploy();
+        let pet_id = mint(&mut contract, alice(), 100);
+
+        testing_env!(ctx(alice(), 100, 1).build());
+        contract.list_pet(pet_id, U128(5 * ONE_NEAR));
+
+        let listing = contract.get_pet_listing(pet_id).unwrap();
+        assert_eq!(listing.seller_id, alice());
+        assert_eq!(listing.price.0, 5 * ONE_NEAR);
+        assert_eq!(
+            contract.get_pet(pet_id).unwrap().listed_price,
+            Some(U128(5 * ONE_NEAR))
+        );
+
+        testing_env!(ctx(bob(), 110, 5 * ONE_NEAR).build());
+        let _ = contract.buy_pet(pet_id);
+
+        // Both the standard's record and the game's own move together.
+        assert_eq!(contract.get_pet(pet_id).unwrap().owner_id, bob());
+        assert_eq!(contract.get_pet_attrs(pet_id).0, bob());
+        assert_eq!(contract.nft_supply_for_owner(bob()), U128(1));
+        assert_eq!(contract.nft_supply_for_owner(alice()), U128(0));
+
+        // And the sale is over.
+        assert!(contract.get_pet_listing(pet_id).is_none());
+        assert!(contract.get_pet(pet_id).unwrap().listed_price.is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "at work in the AI Lab")]
+    fn a_staked_pet_cannot_be_listed() {
+        let mut contract = deploy();
+        let pet_id = mint(&mut contract, alice(), 100);
+
+        testing_env!(ctx(stake(), 100, 0).build());
+        contract.set_locked(pet_id, true);
+
+        testing_env!(ctx(alice(), 100, 1).build());
+        contract.list_pet(pet_id, U128(ONE_NEAR));
+    }
+
+    #[test]
+    fn staking_a_listed_pet_pulls_the_listing() {
+        let mut contract = deploy();
+        let pet_id = mint(&mut contract, alice(), 100);
+
+        testing_env!(ctx(alice(), 100, 1).build());
+        contract.list_pet(pet_id, U128(ONE_NEAR));
+        assert!(contract.get_pet_listing(pet_id).is_some());
+
+        testing_env!(ctx(stake(), 100, 0).build());
+        contract.set_locked(pet_id, true);
+
+        assert!(
+            contract.get_pet_listing(pet_id).is_none(),
+            "a buyer must not be sold a pet that cannot be moved"
+        );
+    }
+
+    #[test]
+    fn transferring_a_listed_pet_ends_the_sale() {
+        let mut contract = deploy();
+        let pet_id = mint(&mut contract, alice(), 100);
+
+        testing_env!(ctx(alice(), 100, 1).build());
+        contract.list_pet(pet_id, U128(ONE_NEAR));
+        contract.nft_transfer(bob(), pet_id.to_string(), None, None);
+
+        assert!(contract.get_pet_listing(pet_id).is_none());
+        assert_eq!(contract.get_pet(pet_id).unwrap().owner_id, bob());
+    }
+
+    #[test]
+    #[should_panic(expected = "at least the asking price")]
+    fn underpaying_buys_nothing() {
+        let mut contract = deploy();
+        let pet_id = mint(&mut contract, alice(), 100);
+
+        testing_env!(ctx(alice(), 100, 1).build());
+        contract.list_pet(pet_id, U128(5 * ONE_NEAR));
+
+        testing_env!(ctx(bob(), 110, 4 * ONE_NEAR).build());
+        let _ = contract.buy_pet(pet_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "listing is yours")]
+    fn you_cannot_buy_your_own_pet() {
+        let mut contract = deploy();
+        let pet_id = mint(&mut contract, alice(), 100);
+
+        testing_env!(ctx(alice(), 100, 1).build());
+        contract.list_pet(pet_id, U128(ONE_NEAR));
+        testing_env!(ctx(alice(), 110, ONE_NEAR).build());
+        let _ = contract.buy_pet(pet_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "not for sale")]
+    fn you_cannot_buy_what_is_not_listed() {
+        let mut contract = deploy();
+        let pet_id = mint(&mut contract, alice(), 100);
+        testing_env!(ctx(bob(), 110, ONE_NEAR).build());
+        let _ = contract.buy_pet(pet_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "listing is not yours")]
+    fn only_the_seller_can_unlist() {
+        let mut contract = deploy();
+        let pet_id = mint(&mut contract, alice(), 100);
+
+        testing_env!(ctx(alice(), 100, 1).build());
+        contract.list_pet(pet_id, U128(ONE_NEAR));
+
+        testing_env!(ctx(bob(), 100, 1).build());
+        contract.unlist_pet(pet_id);
+    }
+
+    #[test]
+    fn the_fee_is_capped() {
+        let mut contract = deploy();
+        testing_env!(ctx(owner(), 0, 0).build());
+        contract.set_market_fee_bps(1_000);
+        assert_eq!(
+            contract.get_config()["market_fee_bps"].as_u64().unwrap(),
+            1_000
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot exceed 10%")]
+    fn the_fee_cannot_be_set_above_the_cap() {
+        let mut contract = deploy();
+        testing_env!(ctx(owner(), 0, 0).build());
+        contract.set_market_fee_bps(1_001);
     }
 
     // ── Migration ────────────────────────────────────────────────────────────

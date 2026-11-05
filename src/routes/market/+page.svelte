@@ -2,6 +2,7 @@
   import AppShell from '#lib/components/AppShell.svelte';
   import ConnectWallet from '#lib/components/ConnectWallet.svelte';
   import Modal from '#lib/components/Modal.svelte';
+  import PetMarket from '#lib/components/PetMarket.svelte';
   import {
     CREDIT_ITEMS,
     CREDIT_ITEM_LIST,
@@ -24,6 +25,8 @@
   import { wallet } from '#lib/near/wallet.svelte';
   import { itemCount, liveCredits, player, refreshPlayer } from '#lib/stores/player.svelte';
   import { toastError, withToast } from '#lib/stores/toast.svelte';
+
+  let tab = $state<'items' | 'pets'>('items');
 
   let listings = $state<Listing[]>([]);
   let loading = $state(true);
@@ -87,6 +90,22 @@
       <ConnectWallet />
     </div>
   {:else}
+    <div class="mb-3 flex w-full flex-row items-center justify-between rounded-lg bg-[#a9c6e4]">
+      <button type="button" onclick={() => (tab = 'items')} class="w-1/2">
+        <div class="flex justify-center rounded-lg p-2 {tab === 'items' ? 'bg-[#628ab4]' : ''}">
+          <span class="text-sm">Items</span>
+        </div>
+      </button>
+      <button type="button" onclick={() => (tab = 'pets')} class="w-1/2">
+        <div class="flex justify-center rounded-lg p-2 {tab === 'pets' ? 'bg-[#628ab4]' : ''}">
+          <span class="text-sm">Pets</span>
+        </div>
+      </button>
+    </div>
+
+    {#if tab === 'pets'}
+      <PetMarket />
+    {:else}
     <div class="grid grid-cols-1 gap-3 md:grid-cols-2 md:items-start">
       <!-- What your pets find -->
       <section class="flex flex-col gap-2 rounded-lg border-2 border-[#304053] p-3">
@@ -212,6 +231,7 @@
         {/if}
       </section>
     </div>
+    {/if}
   {/if}
 </AppShell>
 
