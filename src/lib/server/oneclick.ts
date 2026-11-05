@@ -9,12 +9,60 @@ import type { ExecutionStatus, QuoteRequest, QuoteResponse, TokenResponse } from
 
 const API = `${ONECLICK_BASE_URL.replace(/\/+$/, '')}/v0`;
 
-export const hasPartnerKey = () => ONECLICK_JWT.length > 0;
+/**
+ * NEAR Intents issues more than one kind of JWT, and they are not
+ * interchangeable. A partner key authenticates 1Click quotes; an `explorer`
+ * key reads swap history from `explorer.near-intents.org` and does nothing
+ * here.
+ *
+ * The claim is in the token's own payload, so checking it costs nothing and
+ * stops the UI from reporting quotes as authenticated when they are not —
+ * which is what happens if the wrong key is pasted into `ONECLICK_JWT`.
+ */
+function keyType(token: string): string | null {
+  const payload = token.split('.')[1];
+  if (!payload) return null;
+  try {
+    const padded = payload.padEnd(payload.length + ((4 - (payload.length % 4)) % 4), '=');
+    const json = atob(padded.replace(/-/g, '+').replace(/_/g, '/'));
+    return (JSON.parse(json) as { key_type?: string }).key_type ?? null;
+  } catch {
+    return null;
+  }
+}
+
+let warnedAboutKeyType = false;
+
+/**
+ * Is a usable 1Click partner key configured?
+ *
+ * A token of the wrong type counts as no key: quotes still work, they just
+ * carry the unauthenticated surcharge, and saying so is better than claiming
+ * an authentication that is not happening.
+ */
+export function hasPartnerKey(): boolean {
+  if (ONECLICK_JWT.length === 0) return false;
+
+  const kind = keyType(ONECLICK_JWT);
+  if (kind && kind !== 'partner') {
+    if (!warnedAboutKeyType) {
+      warnedAboutKeyType = true;
+      console.warn(
+        `[joygotchi] ONECLICK_JWT is a "${kind}" key, not a 1Click partner key. ` +
+          'Quotes will carry the 0.25% unauthenticated fee. Get a partner key from ' +
+          'https://partners.near-intents.org/home.'
+      );
+    }
+    return false;
+  }
+  return true;
+}
 
 function headers(): HeadersInit {
   const base: Record<string, string> = { 'content-type': 'application/json' };
-  // Docs accept either header; X-API-Key is the documented default.
-  if (ONECLICK_JWT) base['X-API-Key'] = ONECLICK_JWT;
+  // Only send a key 1Click can actually use. Sending an explorer key here
+  // authenticates nothing and risks being rejected outright.
+  if (hasPartnerKey()) base['X-API-Key'] = ONECLICK_JWT;
   return base;
 }
 
