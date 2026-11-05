@@ -3,7 +3,7 @@ import type { RequestHandler } from './$types';
 import { MINT_PRICE_WNEAR, MINT_ROUTER_CONTRACT, TREASURY_ACCOUNT } from '#lib/config';
 import { findPayAsset, SETTLEMENT_ASSET } from '#lib/intents/assets';
 import type {
-  BuyJoyMsg,
+  BuyCreditsMsg,
   MintRouterMsg,
   PurchaseQuoteRequest,
   PurchaseQuoteResponse
@@ -40,8 +40,8 @@ export const POST: RequestHandler = async ({ request, fetch }) => {
 
   const { purpose, originAsset, refundTo, accountId } = body;
 
-  if (purpose !== 'mint_pet' && purpose !== 'buy_joy') {
-    badRequest('purpose must be "mint_pet" or "buy_joy"');
+  if (purpose !== 'mint_pet' && purpose !== 'buy_credits') {
+    badRequest('purpose must be "mint_pet" or "buy_credits"');
   }
 
   const payAsset = findPayAsset(originAsset ?? '');
@@ -75,7 +75,7 @@ export const POST: RequestHandler = async ({ request, fetch }) => {
   const routerMsg = JSON.stringify(
     purpose === 'mint_pet'
       ? ({ action: 'mint_pet', account_id: accountId, category, name, quantity } satisfies MintRouterMsg)
-      : ({ action: 'buy_joy', account_id: accountId } satisfies BuyJoyMsg)
+      : ({ action: 'buy_credits', account_id: accountId } satisfies BuyCreditsMsg)
   );
 
   // The router is a contract, so settlement must go through `ft_transfer_call`.

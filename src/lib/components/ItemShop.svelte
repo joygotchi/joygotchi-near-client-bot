@@ -4,15 +4,14 @@
   import { performAiAction } from '#lib/economy/actions';
   import { SINKS, formatCredits } from '#lib/economy/params';
   import { activeUntil } from '#lib/economy/stake';
-  import { buyItem, isAlive, JOY_ITEMS, REVIVAL_ITEM_ID, type Pet } from '#lib/game/pets';
-  import { liveCredits, petState, player, refreshPlayer } from '#lib/stores/player.svelte';
-  import { toastError, toastSuccess, withToast } from '#lib/stores/toast.svelte';
-  import { haptic, notify } from '#lib/telegram';
+  import type { Pet } from '#lib/game/pets';
+  import { liveCredits, petState, player } from '#lib/stores/player.svelte';
+  import { toastError, toastSuccess } from '#lib/stores/toast.svelte';
+  import { haptic, notify } from '#lib/platform';
 
   type Props = { pet: Pet | undefined };
   let { pet }: Props = $props();
 
-  let itemIndex = $state(0);
   let feeding = $state(false);
   let lastMeal = $state<AiFeedResult | null>(null);
 
@@ -23,25 +22,9 @@
   });
 
   const credits = $derived(player.credits + liveCredits(now));
-  const item = $derived(JOY_ITEMS[itemIndex]);
   const feedCost = SINKS.ai_feed.credits;
   const petInfo = $derived(pet ? petState(pet.pet_id) : null);
   const lensFeeds = $derived(petInfo?.lens_feeds_left ?? 0);
-
-  async function buy() {
-    if (!pet) return;
-    haptic();
-
-    // Derived from the starving deadline, not from `pet.status`, which the
-    // contract leaves stale until something touches the pet.
-    if (!isAlive(pet, now) && item.id !== REVIVAL_ITEM_ID) {
-      toastError('Pet has starved — use Holy Water to revive it');
-      return;
-    }
-
-    await withToast('Buying…', () => buyItem(pet.pet_id, item.id), () => `Bought ${item.name}!`);
-    await refreshPlayer(true);
-  }
 
   async function aiFeed() {
     if (!pet || feeding) return;
@@ -116,57 +99,6 @@
 
   <!-- Credit items -->
   <CreditItemShop {pet} {credits} />
-
-  <!-- $JOY items from the game contract -->
-  <div class="flex flex-col gap-2 rounded-lg border-2 border-[#304053] p-3">
-    <div class="flex flex-row items-center justify-between">
-      <span class="text-black">$JOY shop</span>
-      <div class="flex flex-row items-center gap-1">
-        <img width="16" height="16" src="/assets/item/coin.png" alt="" />
-        <small class="text-black">{player.joy.toLocaleString('en-US')}</small>
-      </div>
-    </div>
-
-    <div class="flex w-full flex-row items-center justify-between gap-3">
-      {#each JOY_ITEMS as option, index (option.id)}
-        <button type="button" onclick={() => (itemIndex = index)} aria-label={option.name}>
-          <div
-            class="flex h-14 w-14 items-center justify-center rounded-lg hover:bg-[#628ab4] {itemIndex ===
-            index
-              ? 'bg-[#628ab4]'
-              : 'bg-[#a9c6e4]'}"
-          >
-            <img width={option.width} src={option.icon} alt={option.name} />
-          </div>
-        </button>
-      {/each}
-    </div>
-
-    <div class="flex w-full flex-row items-center justify-between">
-      <div class="flex flex-col">
-        <small class="text-black">BUY 1 {item.name}</small>
-        <small class="text-[0.55rem] text-[#00000088]">
-          {#if item.isRevival}
-            Revives a starved pet
-          {:else if item.timeExtension > 0}
-            +{Math.round(item.timeExtension / 3_600_000)}h before starving
-          {:else}
-            Blocks one attack
-          {/if}
-        </small>
-      </div>
-      <small class="text-black">{item.joy} JOY</small>
-    </div>
-
-    <button
-      type="button"
-      onclick={buy}
-      disabled={!pet}
-      class="h-10 w-full rounded-lg bg-[#2f3b53] disabled:opacity-50"
-    >
-      <span class="font-semibold text-[#fff]">BUY</span>
-    </button>
-  </div>
 
   {#if petInfo && activeUntil(petInfo.shielded_until, now)}
     <small class="text-center text-[0.6rem] text-[#628ab4]">

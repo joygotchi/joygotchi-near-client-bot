@@ -1,16 +1,20 @@
 /**
  * JOYGOTCHI economy parameters.
  *
- * Two resources:
- *  - $JOY   — NEP-141 soft currency, earned by playing, spent on items.
+ * Two resources, and only two:
+ *  - NEAR   — the money rail. It buys pets and credits, and nothing else.
  *  - Credit — "AI Credit" (ACR), 6 decimals, 1 ACR = US$1 of NEAR AI Cloud
- *             compute. Credits are not inflationary: they are the treasury's
- *             NEAR AI stake-to-compute allowance, streamed to whoever has pets
- *             staked. See docs/ECONOMY.md for the full rationale.
+ *             compute. The only thing players earn and the only thing they
+ *             spend in game.
+ *
+ * There is no game token. A mintable soft currency is what lets a game reward
+ * play cheaply, so removing it means rewards had to move somewhere — they pay
+ * credits, which are capped by the treasury's NEAR AI allowance rather than by
+ * a number someone chose. See docs/ECONOMY.md.
  */
 
 export const CREDIT_DECIMALS = 6;
-export const JOY_DECIMALS = 18;
+export const NEAR_DECIMALS = 24;
 
 /** One ACR in the smallest unit. */
 export const ONE_CREDIT = 10n ** BigInt(CREDIT_DECIMALS);
@@ -101,8 +105,7 @@ export type SinkSpec = {
   label: string;
   /** Cost in ACR. */
   credits: number;
-  /** Extra $JOY cost, in whole $JOY. */
-  joy?: number;
+
   description: string;
   /** Does this action actually call NEAR AI inference? */
   usesInference: boolean;
@@ -110,7 +113,7 @@ export type SinkSpec = {
 
 /**
  * Every credit sink. The ones marked `usesInference` really do spend NEAR AI
- * compute, which is why they cost credits rather than $JOY: the sink is matched
+ * compute, which is why they cost credits at all: the sink is matched
  * by a real cost, so the economy cannot drift into pure inflation.
  */
 export const SINKS: Record<CreditAction, SinkSpec> = {
@@ -130,7 +133,6 @@ export const SINKS: Record<CreditAction, SinkSpec> = {
     action: 'train',
     label: 'Train',
     credits: 0.008,
-    joy: 10,
     description: 'A simulated sparring session raises ATK or DEF.',
     usesInference: true
   },
@@ -138,7 +140,6 @@ export const SINKS: Record<CreditAction, SinkSpec> = {
     action: 'evolve',
     label: 'Evolve',
     credits: 0.5,
-    joy: 100,
     description: 'Advance to the next evolution phase. Raises staking weight permanently.',
     usesInference: false
   },
@@ -146,7 +147,6 @@ export const SINKS: Record<CreditAction, SinkSpec> = {
     action: 'craft_item',
     label: 'Craft item',
     credits: 0.02,
-    joy: 25,
     description: 'Generate an item whose stats are rolled from your pet’s history.',
     usesInference: true
   },
@@ -174,16 +174,14 @@ export const SINKS: Record<CreditAction, SinkSpec> = {
   }
 };
 
-/** $JOY fallback when a player has no credits — cheaper, but much less XP. */
-export const JOY_FEED_COST = 1;
-export const JOY_FEED_XP_PENALTY = 0.4;
-
 /**
- * Buying credits with $JOY is deliberately a bad deal, and only goes one way.
- * It gives $JOY a permanent sink without letting credits leak back into a
- * tradeable token.
+ * NEAR needed for one credit, mirroring `mint-router::near_per_credit`.
+ *
+ * A credit is a dollar of compute and NEAR trades around $4, so this is about
+ * a 2x markup: buying credits is meant to be worse than earning them. One way
+ * only — credits never convert back into anything tradeable.
  */
-export const JOY_PER_CREDIT = 400;
+export const NEAR_PER_CREDIT = 0.5;
 
 /**
  * A one-off sponsored grant so a new player can try AI Feed before owning a
@@ -297,6 +295,43 @@ export const BATTLE_WAGER_CREDITS = 0.01;
 
 /** Share of the pot the treasury takes, in basis points. */
 export const BATTLE_RAKE_BPS = 500;
+
+// ── Drops and the item market ────────────────────────────────────────────────
+
+/**
+ * Chance of an item drop, in basis points, from a player's staked weight.
+ * Mirrors `drop_odds` in the contract, which is the authority.
+ */
+export const DROP_BASE_BPS = 200;
+export const DROP_MAX_BPS = 2_500;
+export const DROP_WEIGHT_PER_BPS = 1;
+
+export function dropChanceBps(weight: number): number {
+  if (weight <= 0) return 0;
+  return Math.min(DROP_MAX_BPS, DROP_BASE_BPS + Math.floor(weight / DROP_WEIGHT_PER_BPS));
+}
+
+export const dropChancePercent = (weight: number) => dropChanceBps(weight) / 100;
+
+/** Items a pet of this weight can find, best last. Mirrors the contract. */
+export function droppableItems(weight: number): CreditItemKey[] {
+  const order: CreditItemKey[] = ['tonic', 'charm', 'lens', 'ward'];
+  if (weight <= 0) return [];
+  const tier = weight < 200 ? 0 : weight < 600 ? 1 : weight < 1_400 ? 2 : 3;
+  return order.slice(0, tier + 1);
+}
+
+/** Actions that roll for a drop. */
+export const DROPPING_ACTIONS: CreditAction[] = ['ai_feed', 'train', 'craft_item'];
+
+/** The marketplace cut, in basis points. Leaves circulation into the reserve. */
+export const MARKET_RAKE_BPS = 500;
+
+// ── Mining ───────────────────────────────────────────────────────────────────
+
+/** Credits one mining claim pays. Requires a staked pet. */
+export const MINING_REWARD_CREDITS = 0.005;
+export const MINING_COOLDOWN_SECONDS = 6 * 3600;
 
 // ── Levelling ────────────────────────────────────────────────────────────────
 

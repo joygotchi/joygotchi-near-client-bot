@@ -1,6 +1,5 @@
 import { browser } from '$app/env';
-import { JOY_CONTRACT } from '#lib/config';
-import { CREDIT_DECIMALS, JOY_DECIMALS, SECONDS_PER_DAY } from '#lib/economy/params';
+import { CREDIT_DECIMALS, NEAR_DECIMALS, SECONDS_PER_DAY } from '#lib/economy/params';
 import {
   EMPTY_PET_STATE,
   getPetStates,
@@ -10,7 +9,7 @@ import {
 } from '#lib/economy/stake';
 import { getPets, type Pet } from '#lib/game/pets';
 import { formatAmount } from '#lib/near/amount';
-import { ftBalanceOf } from '#lib/near/rpc';
+import { getAccountBalance } from '#lib/near/rpc';
 import { wallet } from '#lib/near/wallet.svelte';
 
 export const player = $state({
@@ -18,7 +17,10 @@ export const player = $state({
   loaded: false,
   pets: [] as Pet[],
   opponents: [] as Pet[],
-  joy: 0,
+  /** Native NEAR balance. The only money in the game. */
+  near: 0,
+  /** Unused items, as [item_id, count]. */
+  items: [] as Array<[number, number]>,
   /** Credits already claimed and spendable. */
   credits: 0,
   /** Credits accrued since the last claim, at the moment of the last refresh. */
@@ -36,6 +38,10 @@ export const player = $state({
 
 export const petState = (petId: number): PetStateView =>
   player.petStates[petId] ?? EMPTY_PET_STATE(petId);
+
+/** How many of an item the player holds and has not used. */
+export const itemCount = (itemId: number): number =>
+  player.items.find(([id]) => id === itemId)?.[1] ?? 0;
 
 /**
  * Credits accrued right now: the on-chain pending amount plus the stream that
@@ -65,16 +71,17 @@ export async function refreshPlayer(force = false): Promise<void> {
   player.loading = true;
 
   try {
-    const [{ mine, opponents }, joy, stake, pool] = await Promise.all([
+    const [{ mine, opponents }, near, stake, pool] = await Promise.all([
       getPets(accountId),
-      ftBalanceOf(JOY_CONTRACT, accountId),
+      getAccountBalance(accountId),
       getStakeAccount(accountId),
       getStakePool()
     ]);
 
     player.pets = mine;
     player.opponents = opponents;
-    player.joy = Number(formatAmount(joy, JOY_DECIMALS, 4));
+    player.near = Number(formatAmount(near, NEAR_DECIMALS, 4));
+    player.items = stake.items ?? [];
     player.credits = Number(formatAmount(stake.credit_balance, CREDIT_DECIMALS));
     player.pendingCredits = Number(formatAmount(stake.pending_credits, CREDIT_DECIMALS));
     player.autoFeedBudget = Number(formatAmount(stake.auto_feed_budget, CREDIT_DECIMALS));

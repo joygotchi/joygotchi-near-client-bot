@@ -1,6 +1,5 @@
 <script lang="ts">
-  import Footer from '#lib/components/Footer.svelte';
-  import Header from '#lib/components/Header.svelte';
+  import AppShell from '#lib/components/AppShell.svelte';
   import Modal from '#lib/components/Modal.svelte';
   import PetCarousel from '#lib/components/PetCarousel.svelte';
   import { BATTLE_WAGER_CREDITS, WOUND_HOURS } from '#lib/economy/params';
@@ -8,7 +7,7 @@
   import { wallet } from '#lib/near/wallet.svelte';
   import { isStaked, petState, player, refreshPlayer } from '#lib/stores/player.svelte';
   import { toastError, toastSuccess } from '#lib/stores/toast.svelte';
-  import { haptic, notify } from '#lib/telegram';
+  import { haptic, notify } from '#lib/platform';
 
   let mineIndex = $state(0);
   let targetIndex = $state(0);
@@ -58,13 +57,7 @@
   }
 </script>
 
-<svelte:head>
-  <title>JOYGOTCHI · Battle</title>
-</svelte:head>
-
-<Header />
-
-<div class="screen relative h-full w-full overflow-y-auto bg-[#e5f2f8] md:w-[400px]">
+<AppShell title="JOYGOTCHI · Battle">
   {#if !wallet.accountId}
     <div class="flex h-[60vh] items-center justify-center px-6">
       <p class="text-center text-black">Connect a wallet to battle.</p>
@@ -75,7 +68,8 @@
       <a href="/mint" class="rounded-lg bg-[#2d3c53] px-4 py-2 text-white">Mint one</a>
     </div>
   {:else}
-    <div class="relative px-2 pt-3">
+    <div class="mx-auto grid w-full max-w-[900px] grid-cols-1 gap-4 md:grid-cols-[3fr_2fr] md:items-start">
+    <div class="relative">
       <img class="w-full rounded-lg" src="/assets/background/frame_battle.png" alt="" />
 
       <!-- Opponent -->
@@ -100,7 +94,7 @@
       </div>
     </div>
 
-    <div class="mt-3 flex flex-col gap-2 px-2">
+    <div class="flex flex-col gap-2">
       <button
         type="button"
         onclick={() => (picking = true)}
@@ -132,11 +126,9 @@
         Nobody's pet dies here. The wager moves to the winner and the loser needs healing.
       </small>
     </div>
-    <div class="clear"></div>
+    </div>
   {/if}
-</div>
-
-<Footer />
+</AppShell>
 
 <Modal title="Choose an opponent" open={picking} onclose={() => (picking = false)}>
   <div class="flex max-h-[60vh] flex-col gap-2 overflow-y-auto">

@@ -1,8 +1,7 @@
 <script lang="ts">
+  import AppShell from '#lib/components/AppShell.svelte';
   import ConnectWallet from '#lib/components/ConnectWallet.svelte';
   import CountDownTimer from '#lib/components/CountDownTimer.svelte';
-  import Footer from '#lib/components/Footer.svelte';
-  import Header from '#lib/components/Header.svelte';
   import ItemShop from '#lib/components/ItemShop.svelte';
   import Loading from '#lib/components/Loading.svelte';
   import MintPanel from '#lib/components/MintPanel.svelte';
@@ -32,104 +31,85 @@
   }
 </script>
 
-<svelte:head>
-  <title>JOYGOTCHI</title>
-</svelte:head>
-
-{#if !wallet.ready}
-  <div class="screen flex h-screen w-full items-center justify-center bg-[#e5f2f8] md:w-[400px]">
-    <Loading />
-  </div>
-{:else if !wallet.accountId}
-  <Header />
-  <div class="screen flex w-full flex-col items-center justify-center bg-[#e5f2f8] md:rounded-lg">
-    <div class="flex h-[70vh] w-full items-center justify-center px-6">
-      <ConnectWallet />
-    </div>
-  </div>
-{:else}
-  <Header tall={player.pets.length > 0}>
+<AppShell title="JOYGOTCHI">
+  {#snippet banner()}
     {#if pet}
-      <div
-        class="absolute top-2/3 left-1/2 h-10 -translate-x-1/2 rounded-full bg-[#f48f59] px-3 py-2 text-center"
-      >
-        <CountDownTimer seconds={secondsUntilStarving(pet)} />
+      <div class="flex flex-row items-center justify-center gap-2">
+        <span class="rounded-full bg-[#f48f59] px-3 py-1 text-sm text-white">
+          <CountDownTimer seconds={secondsUntilStarving(pet)} />
+        </span>
+        <small class="text-white/70">until {pet.name} starves</small>
       </div>
     {/if}
-  </Header>
+  {/snippet}
 
-  <div
-    class="screen relative h-full w-full overflow-y-auto bg-[#e5f2f8] md:w-[400px] md:rounded-lg"
-  >
-    {#if player.pets.length === 0}
-      {#if player.loading && !player.loaded}
-        <div class="flex h-[60vh] items-center justify-center"><Loading /></div>
-      {:else}
-        <div class="mt-5 mb-10 w-full px-2">
-          <MintPanel />
-          <div class="clean"></div>
-        </div>
-      {/if}
+  {#if !wallet.ready}
+    <div class="flex h-[60vh] items-center justify-center"><Loading /></div>
+  {:else if !wallet.accountId}
+    <div class="flex h-[60vh] items-center justify-center px-4">
+      <ConnectWallet />
+    </div>
+  {:else if player.pets.length === 0}
+    {#if player.loading && !player.loaded}
+      <div class="flex h-[60vh] items-center justify-center"><Loading /></div>
     {:else}
-      <div class="flex h-full w-full flex-1 flex-col p-3">
-        <!-- Pet stage -->
-        <div class="mt-2 h-full">
-          <div class="relative flex h-[250px] w-full flex-row justify-center rounded-md">
-            <img
-              class="h-full w-full rounded-md"
-              src="/assets/background/screen_pet.png"
-              alt=""
-            />
-            <div class="absolute top-[40%] left-1/2 -translate-x-1/2 -translate-y-1/2">
-              <PetCarousel pets={player.pets} {index} onselect={(next) => (index = next)} />
-            </div>
+      <div class="mx-auto w-full max-w-[460px]">
+        <MintPanel />
+      </div>
+    {/if}
+  {:else}
+    <!-- Two columns from md up: the pet on the left, everything you do to it on the right. -->
+    <div class="grid grid-cols-1 gap-4 md:grid-cols-2 md:items-start">
+      <div class="flex flex-col gap-3">
+        <div class="relative flex h-[250px] w-full flex-row justify-center rounded-md md:h-[320px]">
+          <img class="h-full w-full rounded-md object-cover" src="/assets/background/screen_pet.png" alt="" />
 
-            <button
-              type="button"
-              class="absolute top-2 left-1/2 flex -translate-x-1/2 flex-row items-center gap-1"
-              onclick={() => {
-                draftName = pet?.name ?? '';
-                renaming = true;
-              }}
-            >
-              <p class="text-white">{pet?.name}</p>
-              <img width="14" height="14" src="/assets/icon/pen.svg" alt="Rename" />
-            </button>
-
-            {#if pet && isStaked(pet.pet_id)}
-              <div class="absolute top-2 right-2 rounded-full bg-[#2d3c53] px-2 py-1">
-                <small class="text-[0.6rem] text-white">IN AI LAB</small>
-              </div>
-            {/if}
+          <div class="absolute top-[40%] left-1/2 -translate-x-1/2 -translate-y-1/2">
+            <PetCarousel pets={player.pets} {index} onselect={(next) => (index = next)} />
           </div>
+
+          <button
+            type="button"
+            class="absolute top-2 left-1/2 flex -translate-x-1/2 flex-row items-center gap-1"
+            onclick={() => {
+              draftName = pet?.name ?? '';
+              renaming = true;
+            }}
+          >
+            <p class="text-white">{pet?.name}</p>
+            <img width="14" height="14" src="/assets/icon/pen.svg" alt="Rename" />
+          </button>
+
+          {#if pet && isStaked(pet.pet_id)}
+            <div class="absolute top-2 right-2 rounded-full bg-[#2d3c53] px-2 py-1">
+              <small class="text-[0.6rem] text-white">IN AI LAB</small>
+            </div>
+          {/if}
         </div>
 
-        <!-- Stats -->
-        <div class="mt-2 flex w-full flex-row justify-between rounded-lg bg-[#a9c6e4] px-3 py-4">
+        <div class="grid grid-cols-4 gap-2 rounded-lg bg-[#a9c6e4] px-3 py-4">
           <div class="flex flex-col text-center">
             <p class="text-xl">{pet?.level ?? '-'}</p>
-            <span class="text-[#00000088]">LEVEL</span>
+            <span class="text-[0.6rem] text-[#00000088]">LEVEL</span>
           </div>
           <div class="flex flex-col text-center">
             <p class="text-xl">{pet?.star ?? '-'}</p>
-            <span class="text-[#00000088]">STAR</span>
+            <span class="text-[0.6rem] text-[#00000088]">STAR</span>
           </div>
           <div class="flex flex-col text-center">
             <p class="text-sm">{pet ? petStatus(pet) : '-'}</p>
-            <span class="text-[#00000088]">STATUS</span>
+            <span class="text-[0.6rem] text-[#00000088]">STATUS</span>
           </div>
           <div class="flex flex-col text-center">
             <p class="text-xl">{formatCredits(creditsPerDay(), 2)}</p>
-            <span class="text-[#00000088]">ACR/DAY</span>
+            <span class="text-[0.6rem] text-[#00000088]">ACR/DAY</span>
           </div>
         </div>
-
-        <ItemShop {pet} />
 
         {#if player.stakedPetIds.length === 0}
           <a
             href="/stake"
-            class="mt-3 flex flex-row items-center justify-between rounded-lg border-2 border-[#6251A2] bg-[#6251A2]/25 px-3 py-3 hover:bg-[#6251A2]/35"
+            class="flex flex-row items-center justify-between rounded-lg border-2 border-[#6251A2] bg-[#6251A2]/25 px-3 py-3 hover:bg-[#6251A2]/35"
           >
             <div class="flex flex-col">
               <span class="text-black">Open the AI Lab</span>
@@ -140,14 +120,12 @@
             <img width="14" height="14" src="/assets/icon/arrow_right.png" alt="" />
           </a>
         {/if}
-
-        <div class="clean"></div>
       </div>
-    {/if}
-  </div>
-{/if}
 
-<Footer />
+      <ItemShop {pet} />
+    </div>
+  {/if}
+</AppShell>
 
 <Modal title="Change pet name" open={renaming} onclose={() => (renaming = false)}>
   <label class="flex flex-col gap-1">

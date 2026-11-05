@@ -3,7 +3,7 @@
   import { formatCredits } from '#lib/economy/params';
   import { disconnectWallet, wallet } from '#lib/near/wallet.svelte';
   import { liveCredits, player } from '#lib/stores/player.svelte';
-  import { openLink, telegramStartParam } from '#lib/telegram';
+  import { inviteLink, openExternal, referralCode } from '#lib/platform';
   import ConnectWallet from './ConnectWallet.svelte';
   import CopyField from './CopyField.svelte';
 
@@ -16,7 +16,8 @@
   });
 
   const credits = $derived(player.credits + liveCredits(now));
-  const referral = $derived(telegramStartParam() ?? '—');
+  const referredBy = $derived(referralCode());
+  const invite = $derived(inviteLink(wallet.accountId));
 
   async function logout() {
     await disconnectWallet();
@@ -35,22 +36,27 @@
         <span>Wallet</span>
         <span class="text-sm">{wallet.walletId ?? '—'}</span>
       </div>
-      <div
-        class="flex flex-row items-center justify-between rounded-lg border-2 border-[#304053] p-2 text-black"
-      >
-        <span>Invite code</span>
-        <span class="text-sm">{referral}</span>
-      </div>
+      {#if invite}
+        <CopyField label="Your invite link" value={invite} />
+      {/if}
+      {#if referredBy}
+        <div
+          class="flex flex-row items-center justify-between rounded-lg border-2 border-[#304053] p-2 text-black"
+        >
+          <span>Referred by</span>
+          <span class="text-sm">{referredBy}</span>
+        </div>
+      {/if}
     </div>
 
     <div class="flex flex-col rounded-lg border-2 border-[#304053] p-2 text-black">
       <span>Balance</span>
       <div class="mt-3 flex flex-row items-center justify-between">
         <div class="flex flex-row items-center gap-1">
-          <img width="16" height="16" class="mt-1" src="/assets/item/coin.png" alt="" />
-          <span class="text-lg">$JOY</span>
+          <img width="16" height="16" class="mt-1" src="/assets/icon/near-dark.svg" alt="" />
+          <span class="text-lg">NEAR</span>
         </div>
-        <span>{player.joy.toLocaleString('en-US')}</span>
+        <span>{player.near.toLocaleString('en-US')}</span>
       </div>
       <div class="mt-1 flex flex-row items-center justify-between">
         <div class="flex flex-row items-center gap-1">
@@ -99,20 +105,10 @@
     <button
       type="button"
       class="flex cursor-pointer flex-row items-center gap-1 text-black"
-      onclick={() => openLink('https://t.me/joygotchi_bot')}
-    >
-      <img width="28" height="28" src="/assets/icon/telegram.svg" alt="" />
-      <span class="ml-1 -mt-1 text-lg">Telegram</span>
-    </button>
-
-    <button
-      type="button"
-      class="flex cursor-pointer flex-row items-center gap-1 text-black"
-      onclick={() => openLink(`${EXPLORER_URL}/address/${wallet.accountId ?? ''}`)}
+      onclick={() => openExternal(`${EXPLORER_URL}/address/${wallet.accountId ?? ''}`)}
     >
       <img width="26" height="26" src="/assets/icon/docs.svg" alt="" />
       <span class="ml-2 -mt-1 text-lg">Explorer</span>
     </button>
   </div>
-  <div class="clear"></div>
 </div>

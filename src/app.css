@@ -47,61 +47,31 @@ body {
   overscroll-behavior: none;
 }
 
-/* ── Layout helpers carried over from the React app ───────────────────────── */
-
-.layout {
-  height: 80vh;
-  @media screen and (min-width: 560px) {
-    height: 75vh;
-  }
+/*
+ * The art is pixel art. Browsers smooth upscaled images by default, which on a
+ * desktop viewport turns the sprites to mush — this keeps the pixels crisp.
+ */
+img[src*='/assets/animation/'],
+img[src*='/assets/pet/'],
+img[src*='/assets/items/'],
+img[src*='/assets/item/'],
+img[src*='/assets/button/'],
+img[src*='/assets/tools/'] {
+  image-rendering: pixelated;
 }
 
-.fix-header {
-  width: 100%;
-  @media screen and (min-width: 560px) {
-    width: 400px;
-  }
-}
+/* ── Layout helpers ────────────────────────────────────────────────────────── */
 
-.fix-screen {
-  height: 75vh;
-  @media screen and (min-width: 560px) {
-    height: 100%;
-  }
-}
-
-.screen {
-  width: 100%;
-  height: 100%;
-  @media screen and (min-width: 560px) {
-    width: 400px;
-    height: 100%;
-  }
-}
-
-.mg {
-  top: 30%;
-  left: 46%;
-  width: 90px;
-  transform: rotateY(180deg);
-  @media screen and (min-width: 560px) {
-    top: 23%;
-    left: 50%;
-    width: 70px;
-  }
-}
-
-.responsive {
-  height: 250px;
-  @media screen and (min-width: 560px) {
-    height: 160px;
-  }
-}
+/*
+ * The pet sprite and its arrows. Everything else that used to pin the app to a
+ * 400px column is gone — `AppShell` handles width with Tailwind breakpoints
+ * now, because this is a website rather than a Telegram Mini App.
+ */
 
 .pet {
   width: 90px;
-  @media screen and (min-width: 560px) {
-    width: 70px;
+  @media screen and (min-width: 768px) {
+    width: 110px;
   }
 }
 
@@ -110,11 +80,6 @@ body {
   left: -30px;
   width: 1.3rem;
   height: 1.3rem;
-  @media screen and (min-width: 560px) {
-    left: -40px;
-    width: 1.2rem;
-    height: 1.2rem;
-  }
 }
 
 .arrow-right {
@@ -122,32 +87,6 @@ body {
   right: -30px;
   width: 1.3rem;
   height: 1.3rem;
-  @media screen and (min-width: 560px) {
-    right: -40px;
-    width: 1.2rem;
-    height: 1.2rem;
-  }
-}
-
-.clear {
-  height: 80px;
-  @media screen and (min-width: 560px) {
-    height: 0;
-  }
-}
-
-.clean {
-  height: 120px;
-  @media screen and (min-width: 560px) {
-    height: 0;
-  }
-}
-
-.swap {
-  height: 90px;
-  @media screen and (min-width: 560px) {
-    height: 0;
-  }
 }
 
 /* ── Loading dots ──────────────────────────────────────────────────────────── */

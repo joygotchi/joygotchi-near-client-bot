@@ -1,27 +1,23 @@
 # JOYGOTCHI contracts
 
-Three contracts, built with `near-sdk` 5.30. The economic reasoning behind them
+Two contracts, built with `near-sdk` 5.30. The economic reasoning behind them
 is in [../docs/ECONOMY.md](../docs/ECONOMY.md); this file is the operational
 side.
 
 ```bash
-cargo test     # 24 unit tests
+cargo test     # 49 unit tests
 cargo clippy --all-targets
-./build.sh     # -> res/{joy_token,pet_stake,mint_router}.wasm
+./build.sh     # -> res/{pet_stake,mint_router}.wasm
 ```
 
-## joy-token — $JOY
+There is no game token. NEAR is the only money, and AI credit — a balance in
+`pet-stake` that cannot be transferred — is the only thing players earn and
+spend. See [../docs/ECONOMY.md](../docs/ECONOMY.md) for why.
 
-A plain NEP-141 with a minter allow-list. $JOY is the soft currency: earned by
-mining, battling and missions, spent on items and on the one-way conversion to
-AI credit.
-
-| Method | Who | Notes |
-|---|---|---|
-| `new(owner_id, total_supply)` | deploy | mints the initial supply to the owner |
-| `mint(account_id, amount, memo)` | allow-listed minters | registers storage for the receiver if needed |
-| `burn(amount, memo)` | anybody, own balance | every sink is visible on-chain |
-| `add_minter` / `remove_minter` | owner | keep this list short: game, faucet, mint router |
+**`pet-stake` never holds funds.** It has no payable method and accepts no
+token. Every payment lands on `mint-router`, which calls `grant_credits`. One
+contract in the system custodies money, and it is not the one with the game
+logic.
 
 ## pet-stake — the AI Lab
 
@@ -35,20 +31,37 @@ using the usual accumulator pattern.
 | `sync_pet(pet_id)` | anybody | re-reads attributes after a level-up or evolution |
 | `claim_credits()` | player | `pending` → `credit_balance` |
 | `spend_credits(action, pet_id, amount)` | player | charges the contract's own price; consumes a Focus Lens; emits `credit_spent` |
-| `buy_credit_item(item_id, pet_id)` | player | items 101–104, see below |
 | `claim_faucet()` | player | 0.01 credit, **once per account**, from `sale_reserve` |
+| `claim_mining()` | player | 0.005 credit every 6h; requires staked weight |
+| `grant_credits(account_id, credits)` | **mint router** | returns what the reserve could cover, so the router can refund the rest |
+| `buy_credit_item(item_id, quantity)` | player | into your inventory |
+| `use_item(item_id, pet_id)` | player | applies one from the inventory |
+| `list_item` / `buy_listing` / `cancel_listing` | player | the item market, 5% rake to the reserve |
 | `set_auto_feed_budget(budget)` | player | micro-credits per day, 0 = off |
 | `report_battle(winner_pet, winner_id, loser_pet, loser_id)` | **game contract** | moves the wager, wounds the loser, returns `star_protected` |
-| `ft_on_transfer` | $JOY only | `{"action":"buy_credits"}`; refunds if the reserve is dry |
 | `set_epoch_budget(amount)` | owner | **the one number that sets total emission** |
 | `fund_reserve(credits)` | owner | record credits actually bought on NEAR AI |
 | `set_action_price(action, credits)` | owner | keep in step with `src/lib/economy/params.ts` |
 | `set_item_price(item_id, credits)` | owner | same |
+| `set_mining_reward` / `set_market_rake_bps` / `set_granter` | owner | |
 | `set_battle_params(wager, rake_bps)` | owner | rake capped at 20% |
 | `admin_set_pet(pet_id, owner_id, attrs)` | owner | escape hatch, see below |
 | `get_pool()` / `get_account(id)` / `get_staked_pets(id)` | view | |
 | `is_staked(id)` / `is_attackable(id)` / `get_pet_state(id)` / `get_pet_states(ids)` | view | |
 | `get_items()` / `get_item_price(id)` / `get_action_price(action)` | view | |
+| `get_inventory(id)` / `get_listings(…)` / `get_listings_by(id)` | view | |
+| `get_drop_odds(id)` / `mining_available_at(id)` | view | |
+
+### Drops
+
+Every AI feed, training session, craft, mining claim and battle win rolls for an
+item. The chance is `min(25%, 2% + weight basis points)` and the weight also
+gates which items can appear — a maxed legendary is at 24.4% and can find
+anything; a fresh common is at 3% and finds tonics.
+
+Items sell between players, never back to the contract: drops are free and the
+rate rises with strength, so a contract buyback would be an inflation pump with
+a difficulty slider on it.
 
 ### Credit items
 
@@ -61,7 +74,8 @@ using the usual accumulator pattern.
 
 Every effect is pet state with a deadline or a counter. None of them changes
 staking weight: the accumulator is exact, and a weight that moved on a deadline
-would need the pool updated when nothing is calling it.
+would need the pool updated when nothing is calling it. That is also what makes
+items safe to drop and trade.
 
 ### Battles
 
@@ -110,11 +124,11 @@ Receives wNEAR from 1Click and turns it into a pet or into $JOY.
 
 | Method | Who | Notes |
 |---|---|---|
-| `ft_on_transfer` | wNEAR only | reads the `customRecipientMsg` from the quote |
+| `ft_on_transfer` | wNEAR only | reads the `customRecipientMsg` from the quote; mints a pet or buys credits |
 | `redeem_pending(account_id, index)` | anybody | retries a paid-but-unminted claim |
 | `get_pending(account_id)` | view | paid mints not yet created |
 | `sweep(amount)` | owner | forwards collected wNEAR to the treasury |
-| `set_mint_price` / `set_joy_per_wnear` / `set_game_contract` | owner | |
+| `set_mint_price` / `set_near_per_credit` / `set_game_contract` | owner | |
 
 Payment message:
 
@@ -122,7 +136,7 @@ Payment message:
 { "action": "mint_pet", "account_id": "alice.near",
   "category": "blackdragon", "name": "SMAUG", "quantity": 1 }
 
-{ "action": "buy_joy", "account_id": "alice.near" }
+{ "action": "buy_credits", "account_id": "alice.near" }
 ```
 
 Behaviour that matters: underpayment and unknown categories are refunded in
@@ -138,7 +152,7 @@ fn create_pet_for(&mut self, owner_id: AccountId, name: String, category: String
 
 The payment arrives from a bridge, not from the player's wallet, so the router
 has to be able to assign a pet to somebody other than the caller. It must also
-be an allow-listed minter on `joy-token` for `buy_joy` to work.
+be set as `granter` on `pet-stake` for `buy_credits` to work.
 
 ## Deploying
 
@@ -146,23 +160,19 @@ be an allow-listed minter on `joy-token` for `buy_joy` to work.
 export NEAR_ENV=mainnet
 OWNER=joyv1.near
 
-near deploy joy.joyv1.near   res/joy_token.wasm \
-  --initFunction new --initArgs "{\"owner_id\":\"$OWNER\",\"total_supply\":\"1000000000000000000000000000\"}"
-
 near deploy stake.joyv1.near res/pet_stake.wasm \
-  --initFunction new --initArgs "{\"owner_id\":\"$OWNER\",\"game_contract\":\"game.joyv1.near\",\"joy_token\":\"joy.joyv1.near\",\"epoch_budget\":\"500000000\"}"
+  --initFunction new --initArgs "{\"owner_id\":\"$OWNER\",\"game_contract\":\"game.joyv1.near\",\"granter\":\"mint.joyv1.near\",\"epoch_budget\":\"500000000\"}"
 
 near deploy mint.joyv1.near  res/mint_router.wasm \
-  --initFunction new --initArgs "{\"owner_id\":\"$OWNER\",\"game_contract\":\"game.joyv1.near\",\"joy_token\":\"joy.joyv1.near\",\"wnear\":\"wrap.near\",\"treasury\":\"treasury.joyv1.near\",\"mint_price\":\"2000000000000000000000000\",\"joy_per_wnear\":\"1000000000000000000000\"}"
+  --initFunction new --initArgs "{\"owner_id\":\"$OWNER\",\"game_contract\":\"game.joyv1.near\",\"stake_contract\":\"stake.joyv1.near\",\"wnear\":\"wrap.near\",\"treasury\":\"treasury.joyv1.near\",\"mint_price\":\"2000000000000000000000000\",\"near_per_credit\":\"500000000000000000000000\"}"
 
-# the router mints $JOY for buy_joy, and needs somewhere to put wNEAR
-near call joy.joyv1.near add_minter '{"account_id":"mint.joyv1.near"}' --accountId "$OWNER"
+# the router needs somewhere to put the wNEAR it collects
 near call wrap.near storage_deposit '{"account_id":"mint.joyv1.near"}' \
   --accountId "$OWNER" --deposit 0.00125
 
-# credits the treasury has actually bought, available for $JOY conversion + faucet
+# credits the treasury has actually bought, backing sales, mining and the faucet
 near call stake.joyv1.near fund_reserve '{"credits":"50000000"}' --accountId "$OWNER"
 ```
 
-Then put the deployed ids into `.env` as `PUBLIC_CONTRACT_JOY`,
-`PUBLIC_CONTRACT_STAKE` and `PUBLIC_CONTRACT_MINT_ROUTER`.
+Then put the deployed ids into `.env` as `PUBLIC_CONTRACT_STAKE` and
+`PUBLIC_CONTRACT_MINT_ROUTER`.

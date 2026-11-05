@@ -1,4 +1,4 @@
-import { FT_CONTRACT, GAME_CONTRACT, GAS } from '#lib/config';
+import { GAME_CONTRACT, GAS } from '#lib/config';
 import { viewFunction } from '#lib/near/rpc';
 import { callAndDecode, callFunction } from '#lib/near/tx';
 
@@ -65,59 +65,13 @@ export const PET_SPECIES = [
   }
 ] as const;
 
-/**
- * The game contract's own shop, paid for in $JOY.
- *
- * Ids and names come from the live contract (read back out of the `items`
- * array on existing pets), not from the old client — which had Water on id 1
- * and Beef on id 2, the wrong way round, so buying one gave you the other.
+/*
+ * The game contract has its own item shop, priced in a token that turned out
+ * never to exist on-chain (`faucet.joyv1.near` is not a NEP-141 and exposes no
+ * balance view at all). Items are credit items in `pet-stake` instead — see
+ * `CREDIT_ITEMS` in `#lib/economy/params`. `buyItem` stays for whenever the
+ * game contract gets NEAR pricing.
  */
-export const JOY_ITEMS = [
-  {
-    id: 1,
-    name: 'Beef',
-    icon: '/assets/items/beef.png',
-    width: 40,
-    joy: 1,
-    points: 1000,
-    /** Milliseconds of starving time the item buys back. */
-    timeExtension: 10_800_000,
-    isRevival: false
-  },
-  {
-    id: 2,
-    name: 'Water',
-    icon: '/assets/items/water.png',
-    width: 20,
-    joy: 1,
-    points: 10_000,
-    timeExtension: 10_800_000,
-    isRevival: false
-  },
-  {
-    id: 3,
-    name: 'Shield',
-    icon: '/assets/items/shield.png',
-    width: 40,
-    joy: 1,
-    points: 0,
-    timeExtension: 0,
-    isRevival: false
-  },
-  {
-    id: 4,
-    name: 'Holy Water',
-    icon: '/assets/items/holy_water.png',
-    width: 40,
-    joy: 1,
-    points: 0,
-    timeExtension: 10_800_000,
-    isRevival: true
-  }
-] as const;
-
-/** Kept for readability at call sites. */
-export const REVIVAL_ITEM_ID = 4;
 
 export const petImage = (pet: Pet) =>
   `/assets/animation/${pet.category}/${pet.pet_evolution_phase}.gif`;
@@ -182,7 +136,7 @@ export const createPet = (name: string, metadata: { title: string; description: 
 export const renamePet = (petId: number, name: string) =>
   callFunction(GAME_CONTRACT, 'change_name_pet', { pet_id: petId, name });
 
-/** Buy one of the game contract's $JOY items. */
+/** The game contract's own shop. Not surfaced until it is priced in NEAR. */
 export const buyItem = (petId: number, itemId: number) =>
   callFunction(GAME_CONTRACT, 'buy_item', { pet_id: petId, item_id: itemId });
 
@@ -191,10 +145,6 @@ export const attack = (petId: number, fromId: number, toId: number) =>
 
 export const checkAlive = (petId: number) =>
   callAndDecode<boolean>(GAME_CONTRACT, 'is_pet_alive', { pet_id: petId });
-
-/** Legacy faucet: hands out a little $JOY once a minute. */
-export const claimJoy = (accountId: string) =>
-  callFunction(FT_CONTRACT, 'get_joychi', { addr_to: accountId });
 
 /**
  * Can `mine` attack `target` right now? Mirrors the rules the old React client

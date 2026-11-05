@@ -33,8 +33,11 @@ export const variables = defineEnvVars({
   },
   PUBLIC_NEAR_RPC_URL: {
     public: true,
-    schema: withDefault('https://rpc.mainnet.near.org'),
-    description: 'JSON-RPC endpoint used for view calls.'
+    schema: optional(),
+    description:
+      'JSON-RPC endpoint for view calls. Leave empty to use FastNEAR, picked by network. ' +
+      'It must send CORS headers: the browser reads contract state directly, and ' +
+      'rpc.mainnet.near.org refuses cross-origin requests.'
   },
 
   // ── Public: contracts ───────────────────────────────────────────────────────
@@ -42,16 +45,6 @@ export const variables = defineEnvVars({
     public: true,
     schema: withDefault('game.joyv1.near'),
     description: 'Pet / game contract (create_pet, attack, buy_item, …).'
-  },
-  PUBLIC_CONTRACT_FT: {
-    public: true,
-    schema: withDefault('faucet.joyv1.near'),
-    description: 'Legacy faucet contract that hands out JOY (get_joychi).'
-  },
-  PUBLIC_CONTRACT_JOY: {
-    public: true,
-    schema: withDefault('joy.joyv1.near'),
-    description: '$JOY NEP-141 token contract.'
   },
   PUBLIC_CONTRACT_STAKE: {
     public: true,
@@ -72,18 +65,6 @@ export const variables = defineEnvVars({
     public: true,
     schema: decimal('2'),
     description: 'Price of one pet, in wNEAR (human units).'
-  },
-
-  // ── Public: Telegram ────────────────────────────────────────────────────────
-  PUBLIC_TG_BOT_ID: {
-    public: true,
-    schema: withDefault('joygotchi_bot/game'),
-    description: 'Telegram Mini App id, used by the in-Telegram HOT wallet flow.'
-  },
-  PUBLIC_TG_WALLET_ID: {
-    public: true,
-    schema: withDefault('herewalletbot/app'),
-    description: 'Telegram wallet app id for HOT wallet.'
   },
 
   // ── Private: NEAR Intents 1Click ────────────────────────────────────────────

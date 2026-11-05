@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { buyCreditItem } from '#lib/economy/stake';
+  import { buyAndUseItem, useItem } from '#lib/economy/stake';
   import {
     CREDIT_ITEM_LIST,
     formatCredits,
@@ -7,9 +7,9 @@
   } from '#lib/economy/params';
   import { activeUntil } from '#lib/economy/stake';
   import type { Pet } from '#lib/game/pets';
-  import { petState, player, refreshPlayer } from '#lib/stores/player.svelte';
+  import { itemCount, petState, player, refreshPlayer } from '#lib/stores/player.svelte';
   import { toastError, withToast } from '#lib/stores/toast.svelte';
-  import { haptic } from '#lib/telegram';
+  import { haptic } from '#lib/platform';
 
   type Props = { pet: Pet | undefined; credits: number };
   let { pet, credits }: Props = $props();
@@ -40,10 +40,16 @@
     return null;
   }
 
-  async function buy(key: CreditItemKey) {
+  /**
+   * Use one from the inventory if there is one — items now drop and can be
+   * bought from other players, so buying is the fallback, not the only path.
+   */
+  async function use(key: CreditItemKey) {
     if (!pet) return;
     const item = CREDIT_ITEM_LIST.find((entry) => entry.key === key)!;
-    if (credits < item.credits) {
+    const owned = itemCount(item.id);
+
+    if (owned === 0 && credits < item.credits) {
       toastError(`Needs ${item.credits} credit, you have ${formatCredits(credits)}`);
       return;
     }
@@ -51,8 +57,8 @@
     haptic();
     busy = key;
     await withToast(
-      `Buying ${item.label}…`,
-      () => buyCreditItem(key, pet.pet_id),
+      owned > 0 ? `Using ${item.label}…` : `Buying ${item.label}…`,
+      () => (owned > 0 ? useItem(key, pet.pet_id) : buyAndUseItem(key, pet.pet_id)),
       () => `${item.label} applied to ${pet.name}`
     );
     busy = null;
@@ -83,10 +89,11 @@
     <div class="grid grid-cols-2 gap-2">
       {#each CREDIT_ITEM_LIST as item (item.id)}
         {@const note = activeNote(item.key)}
+        {@const owned = itemCount(item.id)}
         <button
           type="button"
-          onclick={() => buy(item.key)}
-          disabled={busy !== null || credits < item.credits}
+          onclick={() => use(item.key)}
+          disabled={busy !== null || (owned === 0 && credits < item.credits)}
           class="flex flex-col gap-1 rounded-lg border-2 border-[#304053] p-2 text-left disabled:opacity-50"
         >
           <div class="flex flex-row items-center justify-between">
@@ -94,15 +101,21 @@
               <img width="18" height="18" src={item.icon} alt="" />
               <small class="text-black">{item.label}</small>
             </div>
-            <small class="text-[0.6rem] text-black">{item.credits}</small>
+            {#if owned > 0}
+              <small class="rounded bg-[#a9c6e4] px-1 text-[0.6rem] text-[#2d3c53]">x{owned}</small>
+            {:else}
+              <small class="text-[0.6rem] text-black">{item.credits}</small>
+            {/if}
           </div>
           <small class="text-[0.55rem] leading-tight text-[#00000088]">
             {item.description}
           </small>
-          {#if note}
+          {#if busy === item.key}
+            <small class="text-[0.55rem] text-[#628ab4]">· working…</small>
+          {:else if note}
             <small class="text-[0.55rem] text-[#628ab4]">· {note}</small>
-          {:else if busy === item.key}
-            <small class="text-[0.55rem] text-[#628ab4]">· buying…</small>
+          {:else if owned > 0}
+            <small class="text-[0.55rem] text-[#628ab4]">· tap to use</small>
           {/if}
         </button>
       {/each}
@@ -113,5 +126,9 @@
         No credits yet — stake a pet in the AI Lab, or claim the one-off free grant there.
       </small>
     {/if}
+
+    <a href="/market" class="text-center text-[0.6rem] text-[#628ab4] underline">
+      Items also drop while you play, and other players sell them
+    </a>
   {/if}
 </section>

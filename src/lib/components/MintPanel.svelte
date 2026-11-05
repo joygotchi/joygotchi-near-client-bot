@@ -58,18 +58,19 @@
   </div>
 
   <!-- Species picker -->
-  <div class="flex flex-row items-center justify-start gap-5">
+  <div class="grid grid-cols-2 gap-3 sm:grid-cols-3">
     {#each PET_SPECIES as option, index (option.category)}
       <button
         type="button"
         onclick={() => (speciesIndex = index)}
-        class="relative mt-2 h-28 w-28 cursor-pointer rounded-lg border-2 border-[#304053] {speciesIndex ===
+        aria-pressed={speciesIndex === index}
+        class="flex cursor-pointer flex-col items-center gap-1 rounded-lg border-2 border-[#304053] p-2 {speciesIndex ===
         index
-          ? 'border-opacity-100'
-          : 'opacity-50'}"
+          ? 'bg-[#a9c6e4]'
+          : 'opacity-60 hover:opacity-100'}"
       >
-        <img class="ml-3 h-20 w-20 rounded-lg" src={option.preview} alt={option.label} />
-        <small class="absolute bottom-1 ml-1 w-full text-[0.7rem] text-black">
+        <img class="h-20 w-20 rounded-lg" src={option.preview} alt="" />
+        <small class="w-full truncate text-center text-[0.65rem] text-black">
           {option.label}
         </small>
       </button>

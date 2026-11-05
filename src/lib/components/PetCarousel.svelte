@@ -1,6 +1,6 @@
 <script lang="ts">
   import { petImage, type Pet } from '#lib/game/pets';
-  import { haptic } from '#lib/telegram';
+  import { haptic } from '#lib/platform';
 
   type Props = {
     pets: Pet[];

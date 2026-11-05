@@ -1,7 +1,6 @@
 <script lang="ts">
   import ConnectWallet from '#lib/components/ConnectWallet.svelte';
-  import Footer from '#lib/components/Footer.svelte';
-  import Header from '#lib/components/Header.svelte';
+  import AppShell from '#lib/components/AppShell.svelte';
   import {
     BATTLE_WAGER_CREDITS,
     CREDIT_ITEM_LIST,
@@ -31,7 +30,7 @@
     refreshPlayer
   } from '#lib/stores/player.svelte';
   import { withToast } from '#lib/stores/toast.svelte';
-  import { haptic } from '#lib/telegram';
+  import { haptic } from '#lib/platform';
 
   let now = $state(Date.now());
   let autoFeed = $state(0);
@@ -97,19 +96,13 @@
   }
 </script>
 
-<svelte:head>
-  <title>JOYGOTCHI · AI Lab</title>
-</svelte:head>
-
-<Header />
-
-<div class="screen relative h-full w-full overflow-y-auto bg-[#e5f2f8] md:w-[400px]">
+<AppShell title="JOYGOTCHI · AI Lab">
   {#if !wallet.accountId}
     <div class="flex h-[60vh] items-center justify-center px-6">
       <ConnectWallet />
     </div>
   {:else}
-    <div class="flex flex-col gap-3 px-2 pt-3">
+    <div class="grid grid-cols-1 gap-3 md:grid-cols-2 md:items-start">
       <!-- Credit stream -->
       <section class="rounded-lg border-2 border-[#304053] bg-[#2d3c53] p-3">
         <div class="flex flex-row items-start justify-between">
@@ -311,17 +304,11 @@
             </div>
             <div class="flex shrink-0 flex-col items-end">
               <small class="text-black">{sink.credits} ACR</small>
-              {#if sink.joy}
-                <small class="text-[0.6rem] text-[#00000088]">+{sink.joy} JOY</small>
-              {/if}
             </div>
           </div>
         {/each}
       </section>
 
-      <div class="clean"></div>
     </div>
   {/if}
-</div>
-
-<Footer />
+</AppShell>

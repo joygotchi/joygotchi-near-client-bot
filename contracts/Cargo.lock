@@ -1100,14 +1100,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "joy-token"
-version = "0.1.0"
-dependencies = [
- "near-contract-standards",
- "near-sdk",
-]
-
-[[package]]
 name = "js-sys"
 version = "0.3.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"

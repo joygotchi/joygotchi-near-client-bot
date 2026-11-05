@@ -43,17 +43,29 @@ never tradeable.
 
 ## The two resources
 
-| | **$JOY** | **AI credit (ACR)** |
-|---|---|---|
-| Standard | NEP-141, 18 decimals | account balance in `pet-stake`, 6 decimals |
-| Transferable | yes | **no, on purpose** |
-| Where it comes from | mining claims, battle wins, missions | the treasury's NEAR AI allowance, streamed to pet stakers |
-| Where it goes | items, renaming, training fees, conversion to credit | AI feeding, training, crafting, chat, evolving, reviving |
-| Peg | none, it floats | 1 ACR = US$1 of NEAR AI compute |
-| Role | the grind currency | the scarce, *useful* currency |
+There is **no game token**. There is NEAR, and there are credits.
 
-$JOY is the thing you earn by showing up. AI credit is the thing that makes your
-pet better, and it cannot be farmed — only staked for, or bought at a bad rate.
+| | **NEAR** | **AI credit (ACR)** |
+|---|---|---|
+| What it is | the chain's own token | account balance in `pet-stake`, 6 decimals |
+| Transferable | yes, it's NEAR | **no, on purpose** |
+| How you get it | you hold it, or 1Click swaps your ZEC/SOL/BTC into it | staking pets, mining, battle wins, selling items, or buying at a bad rate |
+| What it buys | pets, and credits | everything in the game |
+| Peg | the market's | 1 ACR = US$1 of NEAR AI compute |
+| Role | the way in | the only thing you earn and spend |
+
+An earlier design had a third resource, a mintable soft currency called $JOY.
+It is gone, and removing it forced a useful question: **a soft currency is what
+lets a game reward play cheaply.** Without one, every reward is either real
+money out of the treasury, or it is credits.
+
+Rewards are credits. That caps them against the treasury's NEAR AI allowance —
+a real constraint — rather than against a number somebody picked. NEAR does one
+job and only one: it is how value enters.
+
+Worth knowing: `$JOY` never existed on-chain anyway. `faucet.joyv1.near` is not
+a NEP-141, exposes no balance view at all, and the "1 JOY" prices in the old
+client were labels with nothing behind them.
 
 ## How credit accrues
 
@@ -111,15 +123,15 @@ treasury raises the number on-chain with `set_epoch_budget`.
 
 ## What credits buy
 
-| Action | Cost | $JOY too | Real inference | Effect |
-|---|---|---|---|---|
-| **AI Feed** | 0.002 ACR | — | yes | The pet decides what it wants to eat. Matching its taste multiplies XP by **1.0–1.8×** |
-| **Train** | 0.008 ACR | 10 | yes | A generated sparring drill raises ATK or DEF |
-| **Craft item** | 0.02 ACR | 25 | yes | An item rolled from your pet's own history |
-| **Talk to pet** | 0.001 ACR | — | yes | One message, answered in the pet's voice |
-| **Evolve** | 0.50 ACR | 100 | no | Next evolution phase — permanently more weight |
-| **Revive** | 1.00 ACR | — | no | Bring a dying pet back |
-| **Auto-feed** | 0.015 ACR | — | no | The pet feeds itself while you are away |
+| Action | Cost | Real inference | Effect |
+|---|---|---|---|
+| **AI Feed** | 0.002 ACR | yes | The pet decides what it wants to eat. Matching its taste multiplies XP by **1.0–1.8×** |
+| **Train** | 0.008 ACR | yes | A generated sparring drill raises ATK or DEF |
+| **Craft item** | 0.02 ACR | yes | An item rolled from your pet's own history |
+| **Talk to pet** | 0.001 ACR | yes | One message, answered in the pet's voice |
+| **Evolve** | 0.50 ACR | no | Next evolution phase — permanently more weight and a better drop rate |
+| **Revive** | 1.00 ACR | no | Bring a dying pet back |
+| **Auto-feed** | 0.015 ACR | no | The pet feeds itself while you are away |
 
 ### On the price of a feed
 
@@ -148,22 +160,10 @@ app that does not reduce to "tap the button".
 
 ## Items
 
-Two shops, because two contracts own them.
-
-**The game contract's $JOY shop** is fixed on-chain and cannot be extended from
-here. Its real contents, read back out of the `items` array on live pets:
-
-| id | Item | Effect |
-|---|---|---|
-| 1 | Beef | +3h before starving, 1,000 points |
-| 2 | Water | +3h before starving, 10,000 points |
-| 3 | Shield | blocks one attack |
-| 4 | Holy Water | revives a starved pet |
-
-The old React client had Water on id 1 and Beef on id 2 — the wrong way round,
-so buying one gave you the other. Fixed in `JOY_ITEMS`.
-
-**Credit items** live in `pet-stake`, which is why there can be new ones:
+The game contract has an older shop of its own (Beef, Water, Shield, Holy
+Water) priced in the token that turned out not to exist. It is not surfaced
+until it is repriced in NEAR. Everything below lives in `pet-stake` and is paid
+for in credits:
 
 | id | Item | Cost | Effect |
 |---|---|---|---|
@@ -213,8 +213,8 @@ So losing a battle costs this instead:
 
 The wager is a **transfer, not a destruction**: the loser's loss is the winner's
 gain, so PvP is zero-sum between players rather than eating into the asset base
-the treasury has to back with real compute. Rake funds the reserve behind $JOY
-conversions and the faucet, so PvP never dilutes stakers.
+the treasury has to back with real compute. Rake funds the reserve behind credit
+sales, mining and the faucet, so PvP never dilutes stakers.
 
 A loser who cannot cover the wager still loses the fight — the pot is simply
 whatever they had. Battles never fail for being poor.
@@ -232,8 +232,9 @@ The AI Lab would have been a honeypot.
 The failure mode of every pet game is the player who comes back to a dead pet
 and never opens the app again. Four things guard against it:
 
-1. **Credits never hard-stop you.** Out of credits? Feed with $JOY instead —
-   `JOY_FEED_COST` for 40% of the XP. Worse, never blocked.
+1. **Credits never hard-stop you.** Items drop while you play, other players
+   sell them, mining pays every six hours, and the faucet covers your first
+   few feeds.
 2. **Auto-feed.** Set a daily budget and your pets keep themselves alive from
    your credit balance while you sleep. Capped by you, off by default.
 3. **A one-off faucet.** `claim_faucet` grants 0.01 credit, once per account,
@@ -246,22 +247,82 @@ and never opens the app again. Four things guard against it:
    caps the damage at a finite amount instead of a rate.
 4. **Accrual is visible.** The header ticks. You can watch the thing you earn.
 
-## $JOY ↔ credit
+## NEAR → credit
 
-One way only: **$JOY → credit, at 400 JOY per credit**, and never back.
+One way only: **0.5 NEAR per credit**, and never back.
 
-That rate is deliberately poor. Its job is not to be a good deal — it is to be
-a permanent $JOY sink and a safety valve for a player who wants to evolve a pet
-*today*. Conversions are served out of a separate `sale_reserve` that the
-treasury tops up with `fund_reserve` only after it has actually bought those
-credits on NEAR AI. When the reserve runs dry the contract **refunds the $JOY**
-rather than issuing credit it cannot back.
+A credit is a dollar of compute and NEAR trades around $4, so that is roughly a
+2x markup. Deliberately: buying credits should be worse than earning them. It
+exists as a safety valve for a player who wants to evolve a pet *today*.
 
-Credits do not convert back, and cannot be transferred between accounts. This is
-the single most important constraint in the design: the moment credits become
-tradeable they become a second speculative asset with an implicit redemption
-promise behind it, and the treasury is on the hook for a float it never agreed
-to carry.
+Sales come out of a separate `sale_reserve` that the treasury tops up with
+`fund_reserve` only after it has actually bought those credits on NEAR AI. When
+the reserve cannot cover a purchase, the payment is **refunded** rather than
+issuing credit that nothing stands behind.
+
+Credits do not convert back, and cannot be transferred account to account —
+only items can. This is the single most important constraint in the design: the
+moment credits become tradeable they are a second speculative asset with an
+implicit redemption promise, and the treasury carries a float it never agreed
+to.
+
+### Only one contract ever holds money
+
+`pet-stake` is a pure ledger. It has no payable method, accepts no token, and
+never holds NEAR. Payments land on `mint-router`, which then calls
+`grant_credits`. One place in the system custodies funds, and the contract with
+all the game logic in it is not that place.
+
+A player spending NEAR they already hold takes the same road: wrap it, hand the
+wNEAR to the router. Two transactions, one approval.
+
+## Drops, and selling what you find
+
+Doing things with your pet turns things up. Every AI feed, training session,
+craft, mining claim and battle win rolls for an item drop.
+
+```
+chance = min(25%, 2% + staking_weight basis points)
+```
+
+A fresh common pet is weight 100 → **3%**. A maxed legendary is weight 2,240 →
+**24.4%**. Weight also gates *what* can drop, so the best items only appear for
+pets that earned them.
+
+| Weight | Can find |
+|---|---|
+| 1–199 | AI Tonic |
+| 200–599 | + Star Charm |
+| 600–1,399 | + Focus Lens |
+| 1,400+ | + Sentinel Ward |
+
+The first version of this curve used `weight / 20`, which squeezed the whole
+range between 2.05% and 3.1% and made the 25% ceiling unreachable. "Stronger
+pets find more" was true only on paper; a unit test caught it.
+
+### The market is between players
+
+Items are listed for credits and bought by other players, with a 5% rake that
+leaves circulation into the reserve.
+
+Items are never sold **back to the contract**. Drops are free and the drop rate
+rises with pet strength, so selling loot to the contract would be an inflation
+pump with a difficulty slider on it. Between players, credits only change hands,
+and the rake makes the market a small net sink.
+
+Randomness comes from the block's random seed. Good enough for loot; a validator
+could in principle influence it, so nothing of real value should ever hang on a
+single roll.
+
+## Mining
+
+Mining pays **0.005 credit every 6 hours** and requires a pet staked in the AI
+Lab.
+
+The gate is the point. A NEAR account is nearly free to create, so anything
+payable to "an account" is a sybil tap — which is exactly what the old
+0.05-a-day faucet was. A pet costs 2 wNEAR, so gating on staked weight prices
+the attack.
 
 ## Multichain money-in
 
@@ -320,7 +381,10 @@ telling the player what something will cost before they sign.
 | Parameter | Value | Set by |
 |---|---|---|
 | `epoch_budget` | 500 ACR / 30 days | treasury, `set_epoch_budget` |
-| `joy_per_credit` | 400 JOY | treasury, `set_joy_per_credit` |
+| `near_per_credit` | 0.5 NEAR | treasury, `mint-router::set_near_per_credit` |
+| mining | 0.005 ACR / 6h | treasury, `set_mining_reward` |
+| drop curve | 2%–25%, +1bp per weight | fixed in `drop_odds` |
+| market rake | 500 bps (5%, capped at 20%) | treasury, `set_market_rake_bps` |
 | `faucet_amount` | 0.01 ACR, once per account | treasury, `set_faucet_amount` |
 | `battle_wager` | 0.01 ACR | treasury, `set_battle_params` |
 | `battle_rake_bps` | 500 (5%, capped at 20%) | treasury, `set_battle_params` |
@@ -338,6 +402,8 @@ Written down because they are real, not because they are solved:
   them, but the deployed game contract knows about neither. Until it does, a
   determined player can attack a staked or warded pet by talking to the game
   contract directly, and no battle settles any credits.
+- **Auto-feed is budgeted but still not executed.** The budget is stored
+  on-chain and nothing spends it yet.
 - **Pets are not transferable at all.** `game.joyv1.near` is not NEP-171 — it
   has no `nft_token`, `nft_transfer` or `nft_approve` (verified against mainnet).
   So there is no marketplace and no exit liquidity: minting is a one-way

@@ -1,6 +1,5 @@
 <script lang="ts">
-  import Footer from '#lib/components/Footer.svelte';
-  import Header from '#lib/components/Header.svelte';
+  import AppShell from '#lib/components/AppShell.svelte';
 
   const missions = [
     {
@@ -30,28 +29,22 @@
   ];
 </script>
 
-<svelte:head>
-  <title>JOYGOTCHI · Missions</title>
-</svelte:head>
-
-<Header />
-
-<div class="screen relative h-full w-full overflow-y-auto bg-[#e5f2f8] md:w-[400px]">
-  <div class="mt-8 flex flex-col gap-3 px-2">
+<AppShell title="JOYGOTCHI · Missions">
+  <div class="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
     {#each missions as mission (mission.title)}
       <a
         href="/space"
-        class="flex w-full flex-row items-center justify-between rounded-lg border-2 py-2 pl-3"
+        class="flex w-full flex-row items-center justify-between gap-2 rounded-lg border-2 p-3"
         style="border-color: {mission.color}; background-color: {mission.color}40"
       >
-        <img width="45" height="45" src={mission.icon} alt="" />
-        <div class="flex flex-col gap-1 text-black">
+        <img width="40" height="40" src={mission.icon} alt="" />
+        <div class="flex flex-1 flex-col gap-1 text-black">
           <span class="text-sm">{mission.title}</span>
           <small class="text-[0.6rem]">{mission.subtitle}</small>
         </div>
-        <div class="flex flex-col gap-2">
+        <div class="flex flex-col items-end gap-2">
           <div
-            class="flex items-center justify-center rounded-full border px-2 text-center"
+            class="flex items-center justify-center rounded-full border px-2"
             style="border-color: {mission.color}"
           >
             <small style="color: {mission.color}">{mission.state}</small>
@@ -64,13 +57,7 @@
             <small class="text-black">{mission.reward}</small>
           </div>
         </div>
-        <div class="mt-2 h-8 w-8">
-          <img width="14" height="14" src="/assets/icon/arrow_right.png" alt="" />
-        </div>
       </a>
     {/each}
   </div>
-  <div class="clear"></div>
-</div>
-
-<Footer />
+</AppShell>

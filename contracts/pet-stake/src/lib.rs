@@ -17,14 +17,13 @@
 
 mod types;
 
-use near_contract_standards::fungible_token::receiver::FungibleTokenReceiver;
 use near_sdk::borsh::BorshSerialize;
 use near_sdk::collections::{LookupMap, UnorderedMap};
 use near_sdk::json_types::{U128, U64};
 use near_sdk::serde_json::json;
 use near_sdk::{
     env, ext_contract, near, require, AccountId, BorshStorageKey, Gas, NearToken, PanicOnDefault,
-    Promise, PromiseError, PromiseOrValue,
+    Promise, PromiseError,
 };
 
 pub use types::*;
@@ -40,6 +39,7 @@ enum StorageKey {
     Prices,
     PetStates,
     ItemPrices,
+    Listings,
 }
 
 /// The view this contract needs from the game contract. A deployment whose game
@@ -62,8 +62,9 @@ pub struct PetStake {
     owner_id: AccountId,
     /// Contract that owns the pets.
     game_contract: AccountId,
-    /// $JOY token, the only FT this contract accepts.
-    joy_token: AccountId,
+    /// The only account allowed to grant credits — the mint router, where all
+    /// payments land. This contract itself never receives NEAR or any token.
+    granter: AccountId,
 
     /// Micro-credits streamed per 30-day epoch, set by the treasury to match
     /// what NEAR AI actually grants for its staked NEAR.
@@ -89,13 +90,19 @@ pub struct PetStake {
     total_distributed: u128,
     total_spent: u128,
 
-    /// Credits set aside for $JOY conversions and the faucet. Separate from the
+    /// Credits set aside for sale, mining and the faucet. Separate from the
     /// staking stream so selling credits can never overdraw the real NEAR AI
     /// balance that backs them.
     sale_reserve: u128,
-    /// Whole $JOY (in token units) needed for one credit.
-    joy_per_credit: u128,
     faucet_amount: u128,
+    /// Credits paid by one mining claim.
+    mining_reward: u128,
+
+    /// Items offered for sale between players.
+    listings: UnorderedMap<u64, Listing>,
+    next_listing_id: u64,
+    /// Marketplace cut, in basis points.
+    market_rake_bps: u16,
 
     paused: bool,
 }
@@ -106,13 +113,13 @@ impl PetStake {
     pub fn new(
         owner_id: AccountId,
         game_contract: AccountId,
-        joy_token: AccountId,
+        granter: AccountId,
         epoch_budget: U128,
     ) -> Self {
         let mut contract = Self {
             owner_id,
             game_contract,
-            joy_token,
+            granter,
             epoch_budget: epoch_budget.0,
             total_weight: 0,
             acc_credit_per_weight: 0,
@@ -127,12 +134,14 @@ impl PetStake {
             total_distributed: 0,
             total_spent: 0,
             sale_reserve: 0,
-            // 400 JOY (18 decimals) for one credit — deliberately a bad deal.
-            joy_per_credit: 400 * 10u128.pow(18),
             // One-off grant, not a daily one: NEAR implicit accounts are nearly
             // free to create, and 0.05/day per account would let a script with
             // a thousand accounts drain a $500 monthly budget three times over.
             faucet_amount: ONE_CREDIT / 100, // 0.01 credit, once per account
+            mining_reward: ONE_CREDIT / 200, // 0.005 credit per claim
+            listings: UnorderedMap::new(StorageKey::Listings),
+            next_listing_id: 1,
+            market_rake_bps: 500, // 5%
             paused: false,
         };
 
@@ -433,6 +442,18 @@ impl PetStake {
             }
         }
 
+        // Doing things with your pet is what turns something up.
+        let dropped = if matches!(action.as_str(), "ai_feed" | "train" | "craft_item") {
+            let mut account = self.account_or_default(&account_id);
+            let dropped = self.roll_drop(&account_id, &mut account, action.len() as u8);
+            if dropped.is_some() {
+                self.accounts.insert(&account_id, &account);
+            }
+            dropped
+        } else {
+            None
+        };
+
         self.log_event(
             "credit_spent",
             json!({
@@ -441,6 +462,7 @@ impl PetStake {
                 "pet_id": pet_id,
                 "amount": U128(price),
                 "lens_applied": lens_applied,
+                "dropped_item": dropped,
             }),
         );
 
@@ -453,17 +475,66 @@ impl PetStake {
         self.pet_states.get(&pet_id).unwrap_or_default()
     }
 
-    /// Buy one credit item for a pet.
-    ///
-    /// When the pet is staked here we can check ownership and do. For an
-    /// unstaked pet we cannot without a cross-contract call, so we allow it:
-    /// the only thing at stake is the buyer's own credits, and every effect is
-    /// beneficial to the pet.
-    pub fn buy_credit_item(&mut self, item_id: u16, pet_id: u64) -> U128 {
+    // ── Inventory ────────────────────────────────────────────────────────────
+
+    fn add_item(account: &mut Account, item_id: u16, quantity: u32) {
+        match account.items.iter_mut().find(|(id, _)| *id == item_id) {
+            Some(entry) => entry.1 = entry.1.saturating_add(quantity),
+            None => account.items.push((item_id, quantity)),
+        }
+    }
+
+    fn take_item(account: &mut Account, item_id: u16, quantity: u32) {
+        let entry = account
+            .items
+            .iter_mut()
+            .find(|(id, _)| *id == item_id)
+            .unwrap_or_else(|| env::panic_str("You do not have that item"));
+
+        require!(entry.1 >= quantity, "You do not have that many");
+        entry.1 -= quantity;
+        account.items.retain(|(_, count)| *count > 0);
+    }
+
+    /// Buy an item from the shop. It goes into your inventory; `use_item`
+    /// applies it. The client sends both in one transaction when you buy to
+    /// use straight away.
+    pub fn buy_credit_item(&mut self, item_id: u16, quantity: u32) -> U128 {
         self.assert_running();
         self.update_pool();
 
+        let quantity = quantity.max(1);
         let price = self.item_prices.get(&item_id).expect("Unknown item");
+        let total = price * quantity as u128;
+        let account_id = env::predecessor_account_id();
+
+        let mut account = self.account_or_default(&account_id);
+        self.harvest(&mut account);
+        require!(
+            account.credit_balance >= total,
+            "Not enough credits — claim or earn some first"
+        );
+        account.credit_balance -= total;
+        Self::add_item(&mut account, item_id, quantity);
+        self.accounts.insert(&account_id, &account);
+        self.total_spent += total;
+
+        self.log_event(
+            "item_bought",
+            json!({
+                "account_id": account_id,
+                "item_id": item_id,
+                "quantity": quantity,
+                "credits": U128(total),
+            }),
+        );
+
+        U128(total)
+    }
+
+    /// Spend one item from your inventory on a pet.
+    pub fn use_item(&mut self, item_id: u16, pet_id: u64) {
+        self.assert_running();
         let account_id = env::predecessor_account_id();
 
         if let Some(pet) = self.pets.get(&pet_id) {
@@ -471,14 +542,8 @@ impl PetStake {
         }
 
         let mut account = self.account_or_default(&account_id);
-        self.harvest(&mut account);
-        require!(
-            account.credit_balance >= price,
-            "Not enough credits — claim or convert some first"
-        );
-        account.credit_balance -= price;
+        Self::take_item(&mut account, item_id, 1);
         self.accounts.insert(&account_id, &account);
-        self.total_spent += price;
 
         let now = env::block_timestamp();
         let mut state = self.pet_state_or_default(pet_id);
@@ -500,16 +565,171 @@ impl PetStake {
         self.pet_states.insert(&pet_id, &state);
 
         self.log_event(
-            "item_bought",
+            "item_used",
+            json!({ "account_id": account_id, "pet_id": pet_id, "item_id": item_id }),
+        );
+    }
+
+    // ── Drops ────────────────────────────────────────────────────────────────
+
+    /// Roll for a drop. A stronger pet finds things more often *and* finds
+    /// better things, which is what makes levelling pay for itself.
+    ///
+    /// Randomness comes from the block's random seed. Good enough for loot;
+    /// a validator could in principle influence it, so nothing of real value
+    /// should ever hang on this roll alone.
+    fn roll_drop(&mut self, account_id: &AccountId, account: &mut Account, salt: u8) -> Option<u16> {
+        let (chance_bps, max_tier) = drop_odds(account.weight);
+        if chance_bps == 0 {
+            return None;
+        }
+
+        let seed = env::random_seed();
+        let a = *seed.first().unwrap_or(&0) as u32;
+        let b = *seed.get(1).unwrap_or(&0) as u32;
+        let roll = ((a << 8 | b) ^ salt as u32) % 10_000;
+
+        if roll >= chance_bps {
+            return None;
+        }
+
+        let pick = *seed.get(2).unwrap_or(&0) as usize % (max_tier + 1);
+        let item_id = DROPPABLE_ITEMS[pick];
+        Self::add_item(account, item_id, 1);
+
+        self.log_event(
+            "item_dropped",
             json!({
                 "account_id": account_id,
-                "pet_id": pet_id,
                 "item_id": item_id,
-                "credits": U128(price),
+                "chance_bps": chance_bps,
+                "weight": U128(account.weight),
             }),
         );
 
-        U128(price)
+        Some(item_id)
+    }
+
+    // ── Marketplace ──────────────────────────────────────────────────────────
+
+    /// Offer items to other players, priced in credits.
+    ///
+    /// Items sell to players, never back to the contract. Selling to the
+    /// contract would turn free drops into minted credits, and the drop rate
+    /// rises with pet strength — that is an inflation pump with a difficulty
+    /// slider on it. Between players the credits only change hands.
+    pub fn list_item(&mut self, item_id: u16, quantity: u32, price_each: U128) -> U64 {
+        self.assert_running();
+        require!(quantity > 0, "Nothing to list");
+        require!(price_each.0 > 0, "Set a price");
+        require!(
+            self.item_prices.get(&item_id).is_some(),
+            "Unknown item"
+        );
+
+        let seller_id = env::predecessor_account_id();
+        let mut account = self.account_or_default(&seller_id);
+        Self::take_item(&mut account, item_id, quantity);
+        self.accounts.insert(&seller_id, &account);
+
+        let id = self.next_listing_id;
+        self.next_listing_id += 1;
+
+        self.listings.insert(
+            &id,
+            &Listing {
+                id: U64(id),
+                seller_id: seller_id.clone(),
+                item_id,
+                quantity,
+                price_each,
+                created_at: U64(env::block_timestamp()),
+            },
+        );
+
+        self.log_event(
+            "item_listed",
+            json!({
+                "listing_id": U64(id),
+                "seller_id": seller_id,
+                "item_id": item_id,
+                "quantity": quantity,
+                "price_each": price_each,
+            }),
+        );
+
+        U64(id)
+    }
+
+    pub fn cancel_listing(&mut self, listing_id: U64) {
+        let listing = self.listings.get(&listing_id.0).expect("No such listing");
+        let seller_id = env::predecessor_account_id();
+        require!(listing.seller_id == seller_id, "That listing is not yours");
+
+        let mut account = self.account_or_default(&seller_id);
+        Self::add_item(&mut account, listing.item_id, listing.quantity);
+        self.accounts.insert(&seller_id, &account);
+        self.listings.remove(&listing_id.0);
+
+        self.log_event("listing_cancelled", json!({ "listing_id": listing_id }));
+    }
+
+    pub fn buy_listing(&mut self, listing_id: U64, quantity: u32) -> U128 {
+        self.assert_running();
+        self.update_pool();
+
+        let mut listing = self.listings.get(&listing_id.0).expect("No such listing");
+        let buyer_id = env::predecessor_account_id();
+        require!(listing.seller_id != buyer_id, "That listing is yours");
+        require!(quantity > 0 && quantity <= listing.quantity, "Not that many for sale");
+
+        let total = listing.price_each.0 * quantity as u128;
+        let rake = total * self.market_rake_bps as u128 / 10_000;
+        let to_seller = total - rake;
+
+        let mut buyer = self.account_or_default(&buyer_id);
+        self.harvest(&mut buyer);
+        require!(buyer.credit_balance >= total, "Not enough credits");
+        buyer.credit_balance -= total;
+        Self::add_item(&mut buyer, listing.item_id, quantity);
+        self.accounts.insert(&buyer_id, &buyer);
+
+        let mut seller = self.account_or_default(&listing.seller_id);
+        self.harvest(&mut seller);
+        seller.credit_balance += to_seller;
+        self.accounts.insert(&listing.seller_id, &seller);
+
+        // The rake leaves circulation into the reserve, so the market is a
+        // small credit sink rather than a source.
+        self.sale_reserve += rake;
+
+        listing.quantity -= quantity;
+        if listing.quantity == 0 {
+            self.listings.remove(&listing_id.0);
+        } else {
+            self.listings.insert(&listing_id.0, &listing);
+        }
+
+        self.log_event(
+            "listing_bought",
+            json!({
+                "listing_id": listing_id,
+                "buyer_id": buyer_id,
+                "seller_id": listing.seller_id,
+                "item_id": listing.item_id,
+                "quantity": quantity,
+                "paid": U128(total),
+                "rake": U128(rake),
+            }),
+        );
+
+        U128(total)
+    }
+
+    pub fn set_market_rake_bps(&mut self, rake_bps: u16) {
+        self.assert_owner();
+        require!(rake_bps <= 2_000, "Rake cannot exceed 20%");
+        self.market_rake_bps = rake_bps;
     }
 
     // ── Battles ──────────────────────────────────────────────────────────────
@@ -577,9 +797,10 @@ impl PetStake {
         let mut winner = self.account_or_default(&winner_id);
         self.harvest(&mut winner);
         winner.credit_balance += transferred;
+        self.roll_drop(&winner_id, &mut winner, 7);
         self.accounts.insert(&winner_id, &winner);
 
-        // Rake funds the reserve behind $JOY conversions and the faucet, so PvP
+        // Rake funds the reserve behind credit sales and the faucet, so PvP
         // never dilutes the staking stream.
         self.sale_reserve += rake;
 
@@ -659,7 +880,7 @@ impl PetStake {
     }
 
     /// Record credits the treasury has actually bought on NEAR AI and is
-    /// willing to sell for $JOY or give away through the faucet.
+    /// willing to sell for NEAR or give away through the faucet and mining.
     pub fn fund_reserve(&mut self, credits: U128) {
         self.assert_owner();
         self.sale_reserve += credits.0;
@@ -688,12 +909,6 @@ impl PetStake {
             "battle_params_set",
             json!({ "wager": wager, "rake_bps": rake_bps }),
         );
-    }
-
-    pub fn set_joy_per_credit(&mut self, joy_per_credit: U128) {
-        self.assert_owner();
-        require!(joy_per_credit.0 > 0, "Rate must be positive");
-        self.joy_per_credit = joy_per_credit.0;
     }
 
     pub fn set_faucet_amount(&mut self, amount: U128) {
@@ -773,6 +988,7 @@ impl PetStake {
             pending_credits: U128(pending),
             auto_feed_budget: U128(account.auto_feed_budget),
             last_claim_at: U64(account.last_claim_at),
+            items: account.items.clone(),
         })
     }
 
@@ -840,6 +1056,39 @@ impl PetStake {
         self.item_prices.get(&item_id).map(U128)
     }
 
+    /// What a pet's owner can expect to find, for the UI to show honestly.
+    pub fn get_drop_odds(&self, account_id: AccountId) -> near_sdk::serde_json::Value {
+        let account = self.account_or_default(&account_id);
+        let (chance_bps, tier) = drop_odds(account.weight);
+        json!({
+            "weight": U128(account.weight),
+            "chance_bps": chance_bps,
+            "best_item": DROPPABLE_ITEMS[tier],
+            "can_drop": DROPPABLE_ITEMS[..=tier].to_vec(),
+        })
+    }
+
+    pub fn get_inventory(&self, account_id: AccountId) -> Vec<(u16, u32)> {
+        self.account_or_default(&account_id).items
+    }
+
+    pub fn get_listings(&self, from_index: Option<u64>, limit: Option<u64>) -> Vec<Listing> {
+        let from = from_index.unwrap_or(0) as usize;
+        let limit = limit.unwrap_or(50) as usize;
+        self.listings
+            .values()
+            .skip(from)
+            .take(limit)
+            .collect()
+    }
+
+    pub fn get_listings_by(&self, account_id: AccountId) -> Vec<Listing> {
+        self.listings
+            .values()
+            .filter(|listing| listing.seller_id == account_id)
+            .collect()
+    }
+
     /// Every credit item and its price, for the shop UI.
     pub fn get_items(&self) -> Vec<(u16, U128)> {
         [ITEM_TONIC, ITEM_WARD, ITEM_LENS, ITEM_CHARM]
@@ -852,9 +1101,10 @@ impl PetStake {
         json!({
             "owner_id": self.owner_id,
             "game_contract": self.game_contract,
-            "joy_token": self.joy_token,
-            "joy_per_credit": U128(self.joy_per_credit),
+            "granter": self.granter,
             "faucet_amount": U128(self.faucet_amount),
+            "mining_reward": U128(self.mining_reward),
+            "mining_cooldown_seconds": MINING_COOLDOWN_SECONDS,
             "credit_decimals": CREDIT_DECIMALS,
             "battle_wager": U128(self.battle_wager),
             "battle_rake_bps": self.battle_rake_bps,
@@ -865,54 +1115,105 @@ impl PetStake {
     }
 }
 
-// ── $JOY -> credits ──────────────────────────────────────────────────────────
+// ── Credit grants and mining ─────────────────────────────────────────────────
 
 #[near]
-impl FungibleTokenReceiver for PetStake {
-    /// One-way conversion: $JOY in, credits out, at a deliberately poor rate.
-    /// Credits are real compute, so they must never be convertible back into a
-    /// tradeable token — that is what keeps them from becoming a second
-    /// speculative asset with a redemption promise behind it.
-    fn ft_on_transfer(
-        &mut self,
-        sender_id: AccountId,
-        amount: U128,
-        msg: String,
-    ) -> PromiseOrValue<U128> {
-        require!(
-            env::predecessor_account_id() == self.joy_token,
-            "This contract only accepts $JOY"
-        );
+impl PetStake {
+    /// Hand credits to a player out of the reserve.
+    ///
+    /// This contract never touches NEAR. Payments land on the mint router,
+    /// which is the only account allowed to call this — so there is exactly one
+    /// place in the system that custodies funds, and this one stays a pure
+    /// ledger of a resource that cannot be transferred out anyway.
+    pub fn grant_credits(&mut self, account_id: AccountId, credits: U128) -> U128 {
         self.assert_running();
+        let caller = env::predecessor_account_id();
+        require!(
+            caller == self.granter || caller == self.owner_id,
+            "Only the mint router can grant credits"
+        );
+        require!(credits.0 > 0, "Nothing to grant");
 
-        let action: FtAction = near_sdk::serde_json::from_str(&msg)
-            .unwrap_or_else(|_| env::panic_str("msg must be {\"action\":\"buy_credits\"}"));
-
-        match action {
-            FtAction::BuyCredits => {
-                let credits = amount.0 * ONE_CREDIT / self.joy_per_credit;
-                require!(credits > 0, "Too little $JOY for a single credit unit");
-
-                if credits > self.sale_reserve {
-                    env::log_str("Credit reserve is empty — refunding the $JOY");
-                    return PromiseOrValue::Value(amount);
-                }
-
-                self.sale_reserve -= credits;
-
-                let mut account = self.account_or_default(&sender_id);
-                account.credit_balance += credits;
-                self.accounts.insert(&sender_id, &account);
-
-                self.log_event(
-                    "credits_bought",
-                    json!({ "account_id": sender_id, "joy": amount, "credits": U128(credits) }),
-                );
-
-                // The $JOY stays here as a sink; the treasury burns it later.
-                PromiseOrValue::Value(U128(0))
-            }
+        // Pay what the reserve can cover and report it, so the router can
+        // refund the difference rather than silently keeping the money.
+        let granted = credits.0.min(self.sale_reserve);
+        if granted == 0 {
+            env::log_str("Credit reserve is empty");
+            return U128(0);
         }
+
+        self.sale_reserve -= granted;
+
+        let mut account = self.account_or_default(&account_id);
+        account.credit_balance += granted;
+        self.accounts.insert(&account_id, &account);
+
+        self.log_event(
+            "credits_granted",
+            json!({ "account_id": account_id, "credits": U128(granted) }),
+        );
+
+        U128(granted)
+    }
+
+    pub fn set_granter(&mut self, granter: AccountId) {
+        self.assert_owner();
+        self.granter = granter;
+    }
+
+    /// Mining: a small credit payout for anyone with a pet at work.
+    ///
+    /// Gated on staked weight rather than on an account existing, because a
+    /// NEAR account is nearly free while a pet costs real money — that is what
+    /// keeps this from being the sybil tap a plain daily faucet was.
+    pub fn claim_mining(&mut self) -> U128 {
+        self.assert_running();
+        self.update_pool();
+
+        let account_id = env::predecessor_account_id();
+        let mut account = self.account_or_default(&account_id);
+        require!(account.weight > 0, "Stake a pet in the AI Lab first");
+
+        // As with the faucet, 0 means "never mined" rather than "mined at the
+        // dawn of the chain".
+        let now = env::block_timestamp();
+        require!(
+            account.last_mining_at == 0
+                || now.saturating_sub(account.last_mining_at)
+                    >= MINING_COOLDOWN_SECONDS * NANOS_PER_SECOND,
+            "Mining is still on cooldown"
+        );
+        require!(
+            self.sale_reserve >= self.mining_reward,
+            "The mining reserve is empty — try again later"
+        );
+
+        self.sale_reserve -= self.mining_reward;
+        account.credit_balance += self.mining_reward;
+        account.last_mining_at = now;
+        self.roll_drop(&account_id, &mut account, 13);
+        self.accounts.insert(&account_id, &account);
+
+        self.log_event(
+            "mining_claimed",
+            json!({ "account_id": account_id, "amount": U128(self.mining_reward) }),
+        );
+
+        U128(self.mining_reward)
+    }
+
+    pub fn set_mining_reward(&mut self, amount: U128) {
+        self.assert_owner();
+        self.mining_reward = amount.0;
+    }
+
+    /// When a player can mine again. 0 means now.
+    pub fn mining_available_at(&self, account_id: AccountId) -> U64 {
+        let account = self.account_or_default(&account_id);
+        if account.last_mining_at == 0 {
+            return U64(0);
+        }
+        U64(account.last_mining_at + MINING_COOLDOWN_SECONDS * NANOS_PER_SECOND)
     }
 }
 
@@ -928,8 +1229,8 @@ mod tests {
     fn game() -> AccountId {
         "game.near".parse().unwrap()
     }
-    fn joy() -> AccountId {
-        "joy.near".parse().unwrap()
+    fn router() -> AccountId {
+        "mint.near".parse().unwrap()
     }
     fn alice() -> AccountId {
         "alice.near".parse().unwrap()
@@ -959,7 +1260,7 @@ mod tests {
     /// 500 credits per 30-day epoch.
     fn deploy() -> PetStake {
         testing_env!(ctx(owner(), 0).build());
-        PetStake::new(owner(), game(), joy(), U128(500 * ONE_CREDIT))
+        PetStake::new(owner(), game(), router(), U128(500 * ONE_CREDIT))
     }
 
     #[test]
@@ -1063,50 +1364,240 @@ mod tests {
     }
 
     #[test]
-    fn joy_converts_to_credits_only_while_the_reserve_holds() {
+    fn only_the_router_can_grant_credits() {
         let mut contract = deploy();
 
         testing_env!(ctx(owner(), 0).build());
-        contract.fund_reserve(U128(ONE_CREDIT)); // one credit in reserve
+        contract.fund_reserve(U128(ONE_CREDIT));
 
-        // 400 JOY buys exactly one credit.
-        let four_hundred_joy = U128(400 * 10u128.pow(18));
-        testing_env!(ctx(joy(), 10).build());
-        let refund = contract.ft_on_transfer(
-            alice(),
-            four_hundred_joy,
-            "{\"action\":\"buy_credits\"}".to_string(),
-        );
-        match refund {
-            PromiseOrValue::Value(value) => assert_eq!(value.0, 0, "nothing should be refunded"),
-            _ => panic!("expected an immediate value"),
-        }
+        testing_env!(ctx(router(), 10).build());
+        assert_eq!(contract.grant_credits(alice(), U128(ONE_CREDIT)).0, ONE_CREDIT);
         assert_eq!(
             contract.get_account(alice()).unwrap().credit_balance.0,
             ONE_CREDIT
         );
-
-        // Reserve is empty now, so the next conversion refunds the $JOY.
-        testing_env!(ctx(joy(), 20).build());
-        let refund = contract.ft_on_transfer(
-            bob(),
-            four_hundred_joy,
-            "{\"action\":\"buy_credits\"}".to_string(),
-        );
-        match refund {
-            PromiseOrValue::Value(value) => {
-                assert_eq!(value.0, four_hundred_joy.0, "the $JOY must come back")
-            }
-            _ => panic!("expected an immediate value"),
-        }
     }
 
     #[test]
-    #[should_panic(expected = "only accepts $JOY")]
-    fn rejects_other_tokens() {
+    #[should_panic(expected = "Only the mint router")]
+    fn players_cannot_grant_themselves_credits() {
         let mut contract = deploy();
-        testing_env!(ctx("usdc.near".parse().unwrap(), 10).build());
-        let _ = contract.ft_on_transfer(alice(), U128(1), "{\"action\":\"buy_credits\"}".to_string());
+        testing_env!(ctx(owner(), 0).build());
+        contract.fund_reserve(U128(ONE_CREDIT));
+
+        testing_env!(ctx(alice(), 10).build());
+        contract.grant_credits(alice(), U128(ONE_CREDIT));
+    }
+
+    #[test]
+    fn a_grant_beyond_the_reserve_is_capped_and_reported() {
+        let mut contract = deploy();
+
+        testing_env!(ctx(owner(), 0).build());
+        contract.fund_reserve(U128(ONE_CREDIT / 2));
+
+        testing_env!(ctx(router(), 10).build());
+        // The router refunds the difference based on what came back.
+        assert_eq!(
+            contract.grant_credits(alice(), U128(ONE_CREDIT)).0,
+            ONE_CREDIT / 2
+        );
+        assert_eq!(contract.get_pool().sale_reserve.0, 0);
+    }
+
+    #[test]
+    fn an_empty_reserve_grants_nothing() {
+        let mut contract = deploy();
+        testing_env!(ctx(router(), 10).build());
+        assert_eq!(contract.grant_credits(alice(), U128(ONE_CREDIT)).0, 0);
+    }
+
+    // ── Drops ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn stronger_pets_find_more_and_better() {
+        // A pet with no weight finds nothing at all.
+        assert_eq!(drop_odds(0), (0, 0));
+
+        let (weak_chance, weak_tier) = drop_odds(100); // fresh common
+        let (mid_chance, mid_tier) = drop_odds(800); // levelled epic
+        let (max_chance, max_tier) = drop_odds(2_240); // maxed legendary
+
+        assert!(weak_chance < mid_chance && mid_chance < max_chance);
+        assert!(weak_tier < mid_tier && mid_tier < max_tier);
+
+        // The curve has to span the weights pets actually reach, or "stronger
+        // pets find more" is true only on paper.
+        assert_eq!(weak_chance, 300); // 3%
+        assert_eq!(max_chance, 2_440); // 24.4%
+        assert_eq!(max_tier, DROPPABLE_ITEMS.len() - 1);
+
+        // A stable of pets is capped rather than guaranteed a drop every time.
+        assert_eq!(drop_odds(100_000).0, DROP_MAX_BPS);
+    }
+
+    #[test]
+    fn the_odds_view_tells_the_truth() {
+        let mut contract = deploy();
+        stake_at_zero(&mut contract, alice(), 1);
+
+        testing_env!(ctx(alice(), 10).build());
+        let odds = contract.get_drop_odds(alice());
+        assert!(odds["chance_bps"].as_u64().unwrap() > DROP_BASE_BPS as u64);
+        assert!(!odds["can_drop"].as_array().unwrap().is_empty());
+
+        // Someone with no pets is told so rather than shown a teaser.
+        let none = contract.get_drop_odds(bob());
+        assert_eq!(none["chance_bps"].as_u64().unwrap(), 0);
+    }
+
+    // ── Mining ───────────────────────────────────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "Stake a pet")]
+    fn mining_needs_a_working_pet() {
+        let mut contract = deploy();
+        testing_env!(ctx(owner(), 0).build());
+        contract.fund_reserve(U128(ONE_CREDIT));
+
+        testing_env!(ctx(alice(), 10).build());
+        contract.claim_mining();
+    }
+
+    #[test]
+    fn mining_pays_then_waits() {
+        let mut contract = deploy();
+        stake_at_zero(&mut contract, alice(), 1);
+
+        testing_env!(ctx(owner(), 0).build());
+        contract.fund_reserve(U128(ONE_CREDIT));
+
+        testing_env!(ctx(alice(), 10).build());
+        let paid = contract.claim_mining().0;
+        assert_eq!(paid, ONE_CREDIT / 200);
+        assert!(contract.mining_available_at(alice()).0 > 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "cooldown")]
+    fn mining_cannot_be_spammed() {
+        let mut contract = deploy();
+        stake_at_zero(&mut contract, alice(), 1);
+
+        testing_env!(ctx(owner(), 0).build());
+        contract.fund_reserve(U128(ONE_CREDIT));
+
+        testing_env!(ctx(alice(), 10).build());
+        contract.claim_mining();
+        contract.claim_mining();
+    }
+
+    // ── Marketplace ──────────────────────────────────────────────────────────
+
+    /// Give an account items without relying on a random drop.
+    fn give_items(contract: &mut PetStake, who: AccountId, item_id: u16, quantity: u32) {
+        testing_env!(ctx(who.clone(), EPOCH_SECONDS).build());
+        contract.buy_credit_item(item_id, quantity);
+    }
+
+    #[test]
+    fn items_change_hands_for_credits() {
+        let mut contract = deploy();
+        stake_at_zero(&mut contract, alice(), 1);
+        stake_at_zero(&mut contract, bob(), 2);
+
+        testing_env!(ctx(alice(), EPOCH_SECONDS).build());
+        contract.claim_credits();
+        testing_env!(ctx(bob(), EPOCH_SECONDS).build());
+        contract.claim_credits();
+
+        give_items(&mut contract, alice(), ITEM_WARD, 2);
+        assert_eq!(contract.get_inventory(alice()), vec![(ITEM_WARD, 2)]);
+
+        testing_env!(ctx(alice(), EPOCH_SECONDS).build());
+        let listing_id = contract.list_item(ITEM_WARD, 2, U128(100_000));
+        // Listed items leave the seller's inventory straight away.
+        assert!(contract.get_inventory(alice()).is_empty());
+        assert_eq!(contract.get_listings(None, None).len(), 1);
+
+        let seller_before = contract.get_account(alice()).unwrap().credit_balance.0;
+        let buyer_before = contract.get_account(bob()).unwrap().credit_balance.0;
+        let reserve_before = contract.get_pool().sale_reserve.0;
+
+        testing_env!(ctx(bob(), EPOCH_SECONDS).build());
+        let paid = contract.buy_listing(listing_id, 1).0;
+
+        assert_eq!(paid, 100_000);
+        assert_eq!(contract.get_inventory(bob()), vec![(ITEM_WARD, 1)]);
+        // 5% rake leaves circulation; the rest reaches the seller.
+        assert_eq!(
+            contract.get_account(alice()).unwrap().credit_balance.0,
+            seller_before + 95_000
+        );
+        assert_eq!(
+            contract.get_account(bob()).unwrap().credit_balance.0,
+            buyer_before - 100_000
+        );
+        assert_eq!(contract.get_pool().sale_reserve.0, reserve_before + 5_000);
+
+        // One of the two is still for sale.
+        assert_eq!(contract.get_listings(None, None)[0].quantity, 1);
+    }
+
+    #[test]
+    fn cancelling_returns_the_items() {
+        let mut contract = deploy();
+        funded(&mut contract, alice(), 1);
+        give_items(&mut contract, alice(), ITEM_LENS, 3);
+
+        testing_env!(ctx(alice(), EPOCH_SECONDS).build());
+        let id = contract.list_item(ITEM_LENS, 3, U128(50_000));
+        contract.cancel_listing(id);
+
+        assert_eq!(contract.get_inventory(alice()), vec![(ITEM_LENS, 3)]);
+        assert!(contract.get_listings(None, None).is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "listing is yours")]
+    fn cannot_buy_your_own_listing() {
+        let mut contract = deploy();
+        funded(&mut contract, alice(), 1);
+        give_items(&mut contract, alice(), ITEM_TONIC, 1);
+
+        testing_env!(ctx(alice(), EPOCH_SECONDS).build());
+        let id = contract.list_item(ITEM_TONIC, 1, U128(10_000));
+        contract.buy_listing(id, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "do not have that many")]
+    fn cannot_list_items_you_do_not_hold() {
+        let mut contract = deploy();
+        funded(&mut contract, alice(), 1);
+        give_items(&mut contract, alice(), ITEM_TONIC, 1);
+
+        testing_env!(ctx(alice(), EPOCH_SECONDS).build());
+        contract.list_item(ITEM_TONIC, 5, U128(10_000));
+    }
+
+    #[test]
+    #[should_panic(expected = "Not that many for sale")]
+    fn cannot_buy_more_than_is_listed() {
+        let mut contract = deploy();
+        stake_at_zero(&mut contract, alice(), 1);
+        stake_at_zero(&mut contract, bob(), 2);
+        testing_env!(ctx(alice(), EPOCH_SECONDS).build());
+        contract.claim_credits();
+        testing_env!(ctx(bob(), EPOCH_SECONDS).build());
+        contract.claim_credits();
+
+        give_items(&mut contract, alice(), ITEM_TONIC, 1);
+        testing_env!(ctx(alice(), EPOCH_SECONDS).build());
+        let id = contract.list_item(ITEM_TONIC, 1, U128(10_000));
+
+        testing_env!(ctx(bob(), EPOCH_SECONDS).build());
+        contract.buy_listing(id, 2);
     }
 
     #[test]
@@ -1181,6 +1672,7 @@ mod tests {
         assert!(contract.is_attackable(1));
 
         contract.buy_credit_item(ITEM_WARD, 1);
+        contract.use_item(ITEM_WARD, 1);
         let state = contract.get_pet_state(1);
         assert!(!state.attackable);
         assert!(!contract.is_attackable(1));
@@ -1189,6 +1681,7 @@ mod tests {
 
         // A second ward stacks on top instead of restarting from now.
         contract.buy_credit_item(ITEM_WARD, 1);
+        contract.use_item(ITEM_WARD, 1);
         let second_until = contract.get_pet_state(1).shielded_until.0;
         assert_eq!(second_until, first_until + WARD_SECONDS * NANOS_PER_SECOND);
     }
@@ -1199,6 +1692,7 @@ mod tests {
         funded(&mut contract, alice(), 1);
         contract.unstake_pet(1);
         contract.buy_credit_item(ITEM_WARD, 1);
+        contract.use_item(ITEM_WARD, 1);
 
         assert!(!contract.is_attackable(1));
 
@@ -1213,6 +1707,7 @@ mod tests {
         funded(&mut contract, alice(), 1);
 
         contract.buy_credit_item(ITEM_LENS, 1);
+        contract.use_item(ITEM_LENS, 1);
         assert_eq!(contract.get_pet_state(1).lens_feeds_left, LENS_FEEDS);
 
         for _ in 0..LENS_FEEDS {
@@ -1234,8 +1729,16 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "do not have that item")]
+    fn cannot_use_an_item_you_never_bought() {
+        let mut contract = deploy();
+        funded(&mut contract, alice(), 1);
+        contract.use_item(ITEM_WARD, 1);
+    }
+
+    #[test]
     #[should_panic(expected = "belongs to someone else")]
-    fn cannot_buy_items_for_someone_elses_staked_pet() {
+    fn cannot_use_items_on_someone_elses_staked_pet() {
         let mut contract = deploy();
         stake_at_zero(&mut contract, alice(), 1);
         stake_at_zero(&mut contract, bob(), 2);
@@ -1243,6 +1746,7 @@ mod tests {
         testing_env!(ctx(bob(), EPOCH_SECONDS).build());
         contract.claim_credits();
         contract.buy_credit_item(ITEM_WARD, 1);
+        contract.use_item(ITEM_WARD, 1);
     }
 
     #[test]
@@ -1294,7 +1798,8 @@ mod tests {
         let mut contract = deploy();
         two_fighters(&mut contract);
 
-        contract.buy_credit_item(ITEM_CHARM, 2);
+        contract.buy_credit_item(ITEM_CHARM, 1);
+        contract.use_item(ITEM_CHARM, 2);
         assert!(contract.get_pet_state(2).star_guard);
 
         testing_env!(ctx(game(), EPOCH_SECONDS).build());
@@ -1308,7 +1813,8 @@ mod tests {
         let mut contract = deploy();
         two_fighters(&mut contract);
 
-        contract.buy_credit_item(ITEM_WARD, 2);
+        contract.buy_credit_item(ITEM_WARD, 1);
+        contract.use_item(ITEM_WARD, 2);
 
         testing_env!(ctx(game(), EPOCH_SECONDS).build());
         contract.report_battle(1, alice(), 2, bob());
@@ -1324,7 +1830,8 @@ mod tests {
         assert!(!contract.is_attackable(2));
 
         testing_env!(ctx(bob(), EPOCH_SECONDS).build());
-        contract.buy_credit_item(ITEM_TONIC, 2);
+        contract.buy_credit_item(ITEM_TONIC, 1);
+        contract.use_item(ITEM_TONIC, 2);
         assert_eq!(contract.get_pet_state(2).wounded_until.0, 0);
         assert!(contract.is_attackable(2));
     }

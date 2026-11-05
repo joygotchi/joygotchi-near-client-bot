@@ -27,8 +27,8 @@ use near_sdk::{
 // `redeem_pending`, so being frugal here costs nothing.
 const GAS_FOR_MINT: Gas = Gas::from_tgas(30);
 const GAS_FOR_RESOLVE: Gas = Gas::from_tgas(10);
-const GAS_FOR_JOY_MINT: Gas = Gas::from_tgas(20);
-const GAS_FOR_JOY_RESOLVE: Gas = Gas::from_tgas(5);
+const GAS_FOR_CREDIT_GRANT: Gas = Gas::from_tgas(20);
+const GAS_FOR_CREDIT_RESOLVE: Gas = Gas::from_tgas(5);
 const GAS_FOR_FT_TRANSFER: Gas = Gas::from_tgas(15);
 
 const ALLOWED_CATEGORIES: [&str; 2] = ["blackdragon", "greendragon"];
@@ -51,7 +51,7 @@ enum PaymentMsg {
         #[serde(default = "one")]
         quantity: u32,
     },
-    BuyJoy {
+    BuyCredits {
         account_id: AccountId,
     },
 }
@@ -81,14 +81,22 @@ trait Game {
 #[allow(dead_code)]
 trait Ft {
     fn ft_transfer(&mut self, receiver_id: AccountId, amount: U128, memo: Option<String>);
-    fn mint(&mut self, account_id: AccountId, amount: U128, memo: Option<String>);
+}
+
+/// The staking contract holds the credit ledger and never takes payment — this
+/// router is the only account in the system that custodies funds. It grants
+/// credits on our say-so and reports how many its reserve could cover.
+#[ext_contract(ext_stake)]
+#[allow(dead_code)]
+trait Stake {
+    fn grant_credits(&mut self, account_id: AccountId, credits: U128) -> U128;
 }
 
 #[ext_contract(ext_self)]
 #[allow(dead_code)]
 trait SelfCallbacks {
     fn on_minted(&mut self, account_id: AccountId, index: u64) -> bool;
-    fn on_joy_minted(&mut self, account_id: AccountId, refund: U128) -> U128;
+    fn on_credits_granted(&mut self, account_id: AccountId, paid: U128) -> U128;
 }
 
 #[near(contract_state)]
@@ -96,15 +104,16 @@ trait SelfCallbacks {
 pub struct MintRouter {
     owner_id: AccountId,
     game_contract: AccountId,
-    joy_token: AccountId,
+    /// Credit ledger. Credits bought here are granted there.
+    stake_contract: AccountId,
     /// wNEAR — the only token 1Click settles into for us.
     wnear: AccountId,
     treasury: AccountId,
 
     /// Price of one pet, in yoctoNEAR of wNEAR.
     mint_price: u128,
-    /// $JOY (in token units) handed out per 1 wNEAR for `buy_joy`.
-    joy_per_wnear: u128,
+    /// yoctoNEAR of wNEAR for one AI credit.
+    near_per_credit: u128,
 
     /// Mints that have been paid for but not yet created on the game contract.
     pending: UnorderedMap<AccountId, Vec<PendingMint>>,
@@ -120,20 +129,20 @@ impl MintRouter {
     pub fn new(
         owner_id: AccountId,
         game_contract: AccountId,
-        joy_token: AccountId,
+        stake_contract: AccountId,
         wnear: AccountId,
         treasury: AccountId,
         mint_price: U128,
-        joy_per_wnear: U128,
+        near_per_credit: U128,
     ) -> Self {
         Self {
             owner_id,
             game_contract,
-            joy_token,
+            stake_contract,
             wnear,
             treasury,
             mint_price: mint_price.0,
-            joy_per_wnear: joy_per_wnear.0,
+            near_per_credit: near_per_credit.0,
             pending: UnorderedMap::new(StorageKey::Pending),
             total_minted: 0,
             total_received: 0,
@@ -239,7 +248,8 @@ impl MintRouter {
     pub fn get_stats(&self) -> near_sdk::serde_json::Value {
         json!({
             "mint_price": U128(self.mint_price),
-            "joy_per_wnear": U128(self.joy_per_wnear),
+            "near_per_credit": U128(self.near_per_credit),
+            "stake_contract": self.stake_contract,
             "total_minted": U64(self.total_minted),
             "total_received": U128(self.total_received),
             "pending_accounts": self.pending.len(),
@@ -257,9 +267,10 @@ impl MintRouter {
         self.mint_price = mint_price.0;
     }
 
-    pub fn set_joy_per_wnear(&mut self, joy_per_wnear: U128) {
+    pub fn set_near_per_credit(&mut self, near_per_credit: U128) {
         self.assert_owner();
-        self.joy_per_wnear = joy_per_wnear.0;
+        require!(near_per_credit.0 > 0, "Rate must be positive");
+        self.near_per_credit = near_per_credit.0;
     }
 
     pub fn set_game_contract(&mut self, game_contract: AccountId) {
@@ -360,31 +371,29 @@ impl FungibleTokenReceiver for MintRouter {
                 PromiseOrValue::Value(U128(amount.0 - required))
             }
 
-            PaymentMsg::BuyJoy { account_id } => {
-                let one_near = 10u128.pow(24);
-                let joy = amount.0 * self.joy_per_wnear / one_near;
-                if joy == 0 {
-                    env::log_str("Payment is too small for a single $JOY — refunding");
+            PaymentMsg::BuyCredits { account_id } => {
+                /// Credits carry 6 decimals, matching `pet-stake`.
+                const ONE_CREDIT: u128 = 1_000_000;
+
+                let credits = amount.0 * ONE_CREDIT / self.near_per_credit;
+                if credits == 0 {
+                    env::log_str("Payment is too small for a single credit — refunding");
                     return PromiseOrValue::Value(amount);
                 }
 
                 self.log_event(
-                    "joy_paid",
-                    json!({ "account_id": account_id, "wnear": amount, "joy": U128(joy) }),
+                    "credits_paid",
+                    json!({ "account_id": account_id, "wnear": amount, "credits": U128(credits) }),
                 );
 
                 PromiseOrValue::Promise(
-                    ext_ft::ext(self.joy_token.clone())
-                        .with_static_gas(GAS_FOR_JOY_MINT)
-                        .mint(
-                            account_id.clone(),
-                            U128(joy),
-                            Some("multichain top up".to_string()),
-                        )
+                    ext_stake::ext(self.stake_contract.clone())
+                        .with_static_gas(GAS_FOR_CREDIT_GRANT)
+                        .grant_credits(account_id.clone(), U128(credits))
                         .then(
                             ext_self::ext(env::current_account_id())
-                                .with_static_gas(GAS_FOR_JOY_RESOLVE)
-                                .on_joy_minted(account_id, amount),
+                                .with_static_gas(GAS_FOR_CREDIT_RESOLVE)
+                                .on_credits_granted(account_id, amount),
                         ),
                 )
             }
@@ -394,27 +403,40 @@ impl FungibleTokenReceiver for MintRouter {
 
 #[near]
 impl MintRouter {
-    /// Terminates the `buy_joy` chain with the amount of wNEAR to refund: none
-    /// when the $JOY was minted, all of it when it was not. Without this the
-    /// player could pay and receive nothing.
+    /// Terminates the `buy_credits` chain with the amount of wNEAR to refund.
+    ///
+    /// The staking contract reports how many credits its reserve could cover,
+    /// which may be none. Refunding in that case is the whole point: without
+    /// it a player pays and receives nothing.
     #[private]
-    pub fn on_joy_minted(
+    pub fn on_credits_granted(
         &mut self,
         account_id: AccountId,
-        refund: U128,
-        #[callback_result] result: Result<(), PromiseError>,
+        paid: U128,
+        #[callback_result] result: Result<U128, PromiseError>,
     ) -> U128 {
         match result {
-            Ok(()) => {
-                self.total_received += refund.0;
+            Ok(granted) if granted.0 > 0 => {
+                self.total_received += paid.0;
+                self.log_event(
+                    "credits_granted",
+                    json!({ "account_id": account_id, "credits": granted }),
+                );
                 U128(0)
+            }
+            Ok(_) => {
+                self.log_event(
+                    "credit_reserve_empty",
+                    json!({ "account_id": account_id, "refunded": paid }),
+                );
+                paid
             }
             Err(_) => {
                 self.log_event(
-                    "joy_mint_failed",
-                    json!({ "account_id": account_id, "refunded": refund }),
+                    "credit_grant_failed",
+                    json!({ "account_id": account_id, "refunded": paid }),
                 );
-                refund
+                paid
             }
         }
     }
@@ -432,8 +454,8 @@ mod tests {
     fn game() -> AccountId {
         "game.near".parse().unwrap()
     }
-    fn joy() -> AccountId {
-        "joy.near".parse().unwrap()
+    fn stake() -> AccountId {
+        "stake.near".parse().unwrap()
     }
     fn wnear() -> AccountId {
         "wrap.near".parse().unwrap()
@@ -465,11 +487,12 @@ mod tests {
         MintRouter::new(
             owner(),
             game(),
-            joy(),
+            stake(),
             wnear(),
             treasury(),
             U128(2 * ONE_NEAR),
-            U128(1_000 * 10u128.pow(18)),
+            // 0.5 NEAR per credit.
+            U128(5 * 10u128.pow(23)),
         )
     }
 
@@ -568,8 +591,58 @@ mod tests {
     #[should_panic(expected = "only accepts wNEAR")]
     fn rejects_other_tokens() {
         let mut contract = deploy();
-        testing_env!(ctx(joy()).build());
+        testing_env!(ctx(stake()).build());
         let _ = contract.ft_on_transfer(bridge(), U128(2 * ONE_NEAR), mint_msg(1));
+    }
+
+    #[test]
+    fn buying_credits_forwards_to_the_staking_contract() {
+        let mut contract = deploy();
+        testing_env!(ctx(wnear()).build());
+
+        let msg = json!({ "action": "buy_credits", "account_id": "alice.near" }).to_string();
+        // 1 NEAR at 0.5 NEAR per credit is two credits, so this goes on to the
+        // staking contract rather than being refunded on the spot.
+        match contract.ft_on_transfer(bridge(), U128(ONE_NEAR), msg) {
+            PromiseOrValue::Promise(_) => {}
+            PromiseOrValue::Value(_) => panic!("expected a cross-contract call"),
+        }
+    }
+
+    #[test]
+    fn dust_payments_are_refunded_rather_than_rounded_away() {
+        let mut contract = deploy();
+        testing_env!(ctx(wnear()).build());
+
+        let msg = json!({ "action": "buy_credits", "account_id": "alice.near" }).to_string();
+        let refund = value_of(contract.ft_on_transfer(bridge(), U128(1_000), msg));
+        assert_eq!(refund, 1_000, "too small for one credit, so give it back");
+    }
+
+    #[test]
+    fn a_grant_that_does_not_land_refunds_the_payment() {
+        let mut contract = deploy();
+        testing_env!(ctx("mint.near".parse().unwrap()).build());
+
+        // The staking contract's reserve could not cover it.
+        assert_eq!(
+            contract.on_credits_granted(alice(), U128(ONE_NEAR), Ok(U128(0))).0,
+            ONE_NEAR
+        );
+        // The call itself failed.
+        assert_eq!(
+            contract
+                .on_credits_granted(alice(), U128(ONE_NEAR), Err(PromiseError::Failed))
+                .0,
+            ONE_NEAR
+        );
+        // It worked: nothing to refund.
+        assert_eq!(
+            contract
+                .on_credits_granted(alice(), U128(ONE_NEAR), Ok(U128(2_000_000)))
+                .0,
+            0
+        );
     }
 
     #[test]

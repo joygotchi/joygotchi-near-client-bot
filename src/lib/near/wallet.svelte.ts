@@ -2,10 +2,17 @@ import { browser } from '$app/env';
 import type { NearConnector, NearWalletBase } from '@hot-labs/near-connect';
 import { GAME_CONTRACT, NETWORK } from '#lib/config';
 
-/** Wallet ids from the NEAR Connect manifest that we surface as one-tap buttons. */
+/**
+ * Wallet ids from the NEAR Connect manifest that we surface as one-tap buttons.
+ *
+ * MyNearWallet is here because it is a plain web wallet: it needs no extension
+ * and no app install, which matters now that the game runs in an ordinary
+ * browser rather than inside Telegram. The full selector covers the rest.
+ */
 export const FEATURED_WALLETS = [
+  { id: 'meteor-wallet', label: 'Meteor Wallet', icon: '/assets/icon/planet.svg' },
   { id: 'hot-wallet', label: 'HOT Wallet', icon: '/assets/icon/near.svg' },
-  { id: 'meteor-wallet', label: 'Meteor Wallet', icon: '/assets/icon/planet.svg' }
+  { id: 'mynearwallet', label: 'MyNearWallet', icon: '/assets/icon/near.svg' }
 ] as const;
 
 export type FeaturedWalletId = (typeof FEATURED_WALLETS)[number]['id'];
@@ -43,8 +50,8 @@ async function createConnector(): Promise<NearConnector | null> {
       autoConnect: true,
       footerBranding: {
         heading: 'JOYGOTCHI',
-        link: 'https://t.me/joygotchi_bot',
-        linkText: 'Play on Telegram'
+        link: 'https://github.com/joygotchi/joygotchi-near-client-bot',
+        linkText: 'About JOYGOTCHI'
       }
     });
 

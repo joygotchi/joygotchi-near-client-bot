@@ -1,16 +1,15 @@
 <script lang="ts">
   import CountDownTimer from '#lib/components/CountDownTimer.svelte';
-  import Footer from '#lib/components/Footer.svelte';
-  import Header from '#lib/components/Header.svelte';
+  import AppShell from '#lib/components/AppShell.svelte';
   import Modal from '#lib/components/Modal.svelte';
-  import { claimJoy } from '#lib/game/pets';
+  import { MINING_COOLDOWN_SECONDS, MINING_REWARD_CREDITS } from '#lib/economy/params';
+  import { claimMining } from '#lib/economy/stake';
   import { wallet } from '#lib/near/wallet.svelte';
-  import { refreshPlayer } from '#lib/stores/player.svelte';
+  import { player, refreshPlayer } from '#lib/stores/player.svelte';
   import { toastError, withToast } from '#lib/stores/toast.svelte';
-  import { haptic } from '#lib/telegram';
+  import { haptic } from '#lib/platform';
 
-  const COOLDOWN_SECONDS = 60;
-  const STORAGE_KEY = 'joygotchi:lastClaim';
+  const STORAGE_KEY = 'joygotchi:lastMiningClaim';
 
   let lastClaim = $state(0);
   let now = $state(Date.now());
@@ -23,20 +22,27 @@
   });
 
   const cooldownLeft = $derived(
-    Math.max(0, COOLDOWN_SECONDS - Math.floor((now - lastClaim) / 1000))
+    Math.max(0, MINING_COOLDOWN_SECONDS - Math.floor((now - lastClaim) / 1000))
   );
+
+  /** Mining pays credits and needs a pet at work — that is what stops it being farmable. */
+  const hasWorkingPet = $derived(player.stakedPetIds.length > 0);
 
   async function claim() {
     if (!wallet.accountId) {
       toastError('Connect a wallet first');
       return;
     }
+    if (!hasWorkingPet) {
+      toastError('Stake a pet in the AI Lab first');
+      return;
+    }
     haptic();
 
     const result = await withToast(
-      'Claiming…',
-      () => claimJoy(wallet.accountId as string),
-      () => 'Claim successful!'
+      'Mining…',
+      claimMining,
+      () => `+${MINING_REWARD_CREDITS} AI credit`
     );
 
     if (result) {
@@ -49,23 +55,19 @@
   const slots = [0, 1, 2];
 </script>
 
-<svelte:head>
-  <title>JOYGOTCHI · Mining</title>
-</svelte:head>
-
-<Header />
-
-<div class="screen h-full w-full overflow-y-auto bg-[#e5f2f8] md:w-[400px]">
-  <div class="mt-2 px-2">
-    <div class="relative h-60 w-full rounded-lg border-2 border-[#304053] shadow-sm">
-      <img
-        class="h-60 w-full rounded-lg object-cover"
-        src="/assets/tools/mining.png"
-        alt="Mining rig"
-      />
+<AppShell title="JOYGOTCHI · Mining">
+  <div class="mx-auto w-full max-w-[720px]">
+    <!--
+      The asset is a small icon, not a banner. Centring it on the panel keeps it
+      sharp instead of stretching a 64px sprite across a 240px box.
+    -->
+    <div
+      class="relative flex h-60 w-full items-center justify-center rounded-lg border-2 border-[#304053] bg-[#a9c6e4] shadow-sm"
+    >
+      <img class="h-24 w-24" src="/assets/tools/mining.png" alt="Mining rig" />
       <button
         type="button"
-        disabled={cooldownLeft > 0}
+        disabled={cooldownLeft > 0 || !hasWorkingPet}
         onclick={claim}
         class="absolute bottom-2 left-1/2 flex w-2/4 -translate-x-1/2 flex-row items-center justify-center gap-2 rounded-lg border border-white bg-[#2d3c53] py-3 font-semibold text-white disabled:opacity-70"
       >
@@ -78,12 +80,29 @@
       </button>
     </div>
 
-    <div class="mt-5 flex flex-row justify-between gap-3 pb-10">
+    <div class="mt-3 flex flex-row items-center justify-between rounded-lg bg-[#a9c6e4] px-3 py-2">
+      <small class="text-black">Pays</small>
+      <small class="text-black">
+        {MINING_REWARD_CREDITS} AI credit · every {MINING_COOLDOWN_SECONDS / 3600}h
+      </small>
+    </div>
+
+    {#if !hasWorkingPet}
+      <a
+        href="/stake"
+        class="mt-2 flex flex-row items-center justify-between rounded-lg border-2 border-[#304053] px-3 py-2"
+      >
+        <small class="text-black">Mining needs a pet in the AI Lab</small>
+        <img width="14" height="14" src="/assets/icon/arrow_right.png" alt="" />
+      </a>
+    {/if}
+
+    <div class="mt-5 grid grid-cols-3 gap-3">
       {#each slots as slot (slot)}
         <button
           type="button"
           onclick={() => (toolsOpen = true)}
-          class="relative flex h-44 w-36 flex-col items-center rounded-lg border-2 border-[#304053] bg-[#a9c6e4]/85"
+          class="relative flex h-44 flex-col items-center rounded-lg border-2 border-[#304053] bg-[#a9c6e4]/85"
         >
           <div class="absolute -top-1 left-1 text-white">
             <small class="text-[0.75rem]">Tool</small>
@@ -105,10 +124,7 @@
       {/each}
     </div>
   </div>
-  <div class="clear"></div>
-</div>
-
-<Footer />
+</AppShell>
 
 <Modal title="Tool slot" open={toolsOpen} onclose={() => (toolsOpen = false)}>
   <div class="flex flex-col gap-3">
