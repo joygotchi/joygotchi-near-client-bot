@@ -1,6 +1,6 @@
 import { runAiAction, type AiResult } from '#lib/ai/client';
 import type { PetContext } from '#lib/ai/prompts';
-import { secondsUntilStarving, type Pet } from '#lib/game/pets';
+import { evolutionPhase, secondsUntilStarving, type Pet } from '#lib/game/pets';
 import { wallet } from '#lib/near/wallet.svelte';
 import { refreshPlayer } from '#lib/stores/player.svelte';
 import { SINKS, type CreditAction } from './params';
@@ -13,7 +13,7 @@ export const toPetContext = (pet: Pet): PetContext => ({
   level: pet.level,
   star: pet.star,
   status: pet.status,
-  evolutionPhase: pet.pet_evolution_phase,
+  evolutionPhase: evolutionPhase(pet),
   timeUntilStarving: secondsUntilStarving(pet)
 });
 

@@ -29,6 +29,7 @@ use near_sdk::{
 pub use types::*;
 
 const GAS_FOR_METADATA: Gas = Gas::from_tgas(10);
+const GAS_FOR_LOCK: Gas = Gas::from_tgas(10);
 const GAS_FOR_RESOLVE: Gas = Gas::from_tgas(15);
 
 #[derive(BorshSerialize, BorshStorageKey)]
@@ -48,6 +49,11 @@ enum StorageKey {
 #[allow(dead_code)]
 trait Game {
     fn get_pet_attrs(&self, pet_id: u64) -> (AccountId, PetAttrs);
+
+    /// Mirror the staked flag on the pet contract, so a pet at work here
+    /// cannot be transferred there. A transfer has to be atomic, and a
+    /// cross-contract view cannot be, so the flag has to live on both sides.
+    fn set_locked(&mut self, pet_id: u64, locked: bool);
 }
 
 #[ext_contract(ext_self)]
@@ -323,6 +329,18 @@ impl PetStake {
             "pet_staked",
             json!({ "account_id": account_id, "pet_id": pet_id, "weight": U128(weight) }),
         );
+
+        self.set_pet_lock(pet_id, true);
+    }
+
+    /// Fire-and-forget: a failed lock leaves the pet transferable for a while,
+    /// which the game contract's own checks still catch on the next read, and
+    /// `admin_set_pet` can repair.
+    fn set_pet_lock(&self, pet_id: u64, locked: bool) {
+        ext_game::ext(self.game_contract.clone())
+            .with_static_gas(GAS_FOR_LOCK)
+            .set_locked(pet_id, locked)
+            .detach();
     }
 
     /// Take a pet out of the lab. Credits earned so far stay in `pending`.
@@ -354,6 +372,8 @@ impl PetStake {
             "pet_unstaked",
             json!({ "account_id": account_id, "pet_id": pet_id, "weight": pet.weight }),
         );
+
+        self.set_pet_lock(pet_id, false);
     }
 
     /// Re-read a staked pet's attributes after it levels up or evolves, so its

@@ -1,18 +1,52 @@
 # JOYGOTCHI contracts
 
-Two contracts, built with `near-sdk` 5.30. The economic reasoning behind them
+Three contracts, built with `near-sdk` 5.30. The economic reasoning behind them
 is in [../docs/ECONOMY.md](../docs/ECONOMY.md); this file is the operational
 side.
 
 ```bash
-cargo test     # 49 unit tests
+cargo test     # 81 unit tests
 cargo clippy --all-targets
-./build.sh     # -> res/{pet_stake,mint_router}.wasm
+./build.sh     # -> res/{game,pet_stake,mint_router}.wasm
 ```
 
 There is no game token. NEAR is the only money, and AI credit — a balance in
 `pet-stake` that cannot be transferred — is the only thing players earn and
 spend. See [../docs/ECONOMY.md](../docs/ECONOMY.md) for why.
+
+## game — the pets
+
+A NEP-171 collection with the game on top, replacing `game.joyv1.near`, which
+is not NEP-171, has no combat stats, and stores a status field it only
+refreshes when something touches the pet. Built to
+[../docs/GAME_CONTRACT_V2.md](../docs/GAME_CONTRACT_V2.md), which also records
+the five design decisions taken along the way.
+
+| Method | Who | Notes |
+|---|---|---|
+| `create_pet(name, category)` | anyone, payable | rarity rolled at mint, odds in `get_mint_odds` |
+| `create_pet_for(owner, name, category)` | **mint router** | a bridge pays, so the caller is never the owner |
+| `buy_item(pet_id, item_id)` | pet owner, payable | the shop, priced in NEAR; feeding is capped at 7 banked days |
+| `evolve(pet_id)` | pet owner | needs `level >= phase × 5`; re-syncs staking weight |
+| `attack(pet_id, target_pet_id)` | pet owner | settles through `pet-stake::report_battle` |
+| `award_xp(pet_id, xp)` | **staking contract** | XP for an action it charged credits for |
+| `set_locked(pet_id, locked)` | **staking contract** | a locked pet cannot be transferred or approved |
+| `import_pets(Vec<LegacyPet>)` | owner | migration; preserves `pet_id`, idempotent |
+| `get_pet_attrs(pet_id)` | view | **what `pet-stake` calls** — owner plus rarity/level/star/phase |
+| `get_pet` / `get_all_pet_metadata` / `get_pets_for_owner` | view | status is derived, not stored |
+| NEP-171 core, enumeration, approval | | `token_id` is the decimal `pet_id` |
+
+### The ordering in `attack`
+
+```
+attack → report_battle FIRST → callback applies damage
+```
+
+The other way round looks equivalent and is not: `report_battle` reverts for
+any pet that is staked, warded or wounded, and applying damage first would mean
+a protected pet had already been hurt. Two unit tests pin this down — one that
+`attack` mutates nothing, and one that an `Err` settlement leaves the loser
+untouched.
 
 **`pet-stake` never holds funds.** It has no payable method and accepts no
 token. Every payment lands on `mint-router`, which calls `grant_credits`. One

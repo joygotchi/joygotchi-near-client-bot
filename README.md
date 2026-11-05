@@ -76,7 +76,7 @@ pnpm check     # svelte-check: types, a11y, unused props
 
 ```bash
 cd contracts
-cargo test     # 49 unit tests across both contracts
+cargo test     # 81 unit tests across the three contracts
 ./build.sh     # wasm artifacts into contracts/res/
 ```
 
@@ -116,6 +116,7 @@ src/
         └── credits
 
 contracts/
+├── game/         NEP-171 pets: minting, feeding, evolution, battles
 ├── pet-stake/    the credit ledger: staking, items, drops, market, battles
 └── mint-router/  receives wNEAR from 1Click and mints the pet
 ```
@@ -185,19 +186,16 @@ could do is here, with these changes:
 
 ## Not done
 
-Everything here is finished and tested, and none of it works end to end,
-because all four integration points live in the pet contract and the deployed
-one has none of them: it is not NEP-171, and it has no `get_pet_attrs`,
-no `create_pet_for`, and no call to `report_battle` from `attack`.
+The three contracts are written and unit-tested, but **nothing has been
+deployed and no cross-contract call has ever run**. The acceptance criteria for
+calling the integration done are listed at the end of
+[docs/GAME_CONTRACT_V2.md](docs/GAME_CONTRACT_V2.md); they are the first tests
+that will exercise the promise chains between the contracts rather than each
+one alone.
 
-That interface is written out in
-[docs/GAME_CONTRACT_V2.md](docs/GAME_CONTRACT_V2.md), together with the five
-decisions that have to be made before it can be implemented and the acceptance
-criteria for calling the integration done.
-
-Until then `admin_set_pet` lets an operator push pet attributes by hand, and
-the client blocks the attack button for staked pets — but only the contract can
-actually enforce it.
+The client reads both the v1 and v2 pet shapes, so it works before and after
+the migration — see the table on `Pet` in
+[src/lib/game/pets.ts](src/lib/game/pets.ts).
 
 Smaller things, in priority order: the `/api/ai/chat` replay guard is in-memory
 and needs Redis or Vercel KV before production; auto-feed has an on-chain

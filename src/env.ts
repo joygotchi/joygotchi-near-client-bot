@@ -43,8 +43,10 @@ export const variables = defineEnvVars({
   // ── Public: contracts ───────────────────────────────────────────────────────
   PUBLIC_CONTRACT_GAME: {
     public: true,
-    schema: withDefault('game.joyv1.near'),
-    description: 'Pet / game contract (create_pet, attack, buy_item, …).'
+    schema: withDefault('game-v2.joyv1.near'),
+    description:
+      'Pet contract — contracts/game. The original game.joyv1.near is not NEP-171 and ' +
+      'has none of the methods pet-stake and mint-router call.'
   },
   PUBLIC_CONTRACT_STAKE: {
     public: true,

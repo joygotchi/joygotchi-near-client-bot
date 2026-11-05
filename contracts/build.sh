@@ -7,7 +7,7 @@ mkdir -p res
 
 cargo build --release --target wasm32-unknown-unknown
 
-for crate in pet_stake mint_router; do
+for crate in game pet_stake mint_router; do
   src="target/wasm32-unknown-unknown/release/${crate}.wasm"
   cp "$src" "res/${crate}.wasm"
   printf '%-16s %s bytes\n' "${crate}.wasm" "$(wc -c < "res/${crate}.wasm" | tr -d ' ')"

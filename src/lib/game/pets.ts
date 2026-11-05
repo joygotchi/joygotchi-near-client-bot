@@ -15,18 +15,42 @@ export type PetItem = {
   is_revival: boolean;
 };
 
-/** Pet metadata as returned by `game.joyv1.near::get_all_pet_metadata`. */
+/**
+ * Pet metadata from `get_all_pet_metadata`.
+ *
+ * Both contract versions are accepted, because the v2 contract renamed two
+ * fields for good reasons and the v1 one is still what is deployed:
+ *
+ * | v1 | v2 | why |
+ * |---|---|---|
+ * | `time_until_starving` | `starves_at` | it was always an absolute timestamp, and the old name had the client rendering a 5,460-year countdown |
+ * | `pet_evolution_phase` | `evolution_phase` | the prefix was noise |
+ * | `status` (stored, stale) | `status` (derived) | v1 only rewrote it when something touched the pet |
+ *
+ * Read through the helpers below rather than touching these directly.
+ */
 export type Pet = {
   pet_id: number;
   owner_id: string;
   name: string;
   category: string;
-  pet_species: number;
-  pet_evolution_phase: number;
+  /** v2 only. */
+  rarity?: 'common' | 'rare' | 'epic' | 'legendary';
+  pet_species?: number;
+  /** v1 name. */
+  pet_evolution_phase?: number;
+  /** v2 name. */
+  evolution_phase?: number;
   level: number;
   star: number;
-  score: number;
-  pet_shield: number;
+  /** v2 only. */
+  xp?: number;
+  score?: number;
+  pet_shield?: number;
+  /** v2 only: blocks one attack. */
+  shield?: number;
+  /** v2 only: true while the pet is staked. */
+  locked?: boolean;
   /**
    * Last status the contract wrote. Stale: it only changes when somebody
    * touches the pet, so 14 of the 20 pets on mainnet still say `HAPPY` while
@@ -34,11 +58,10 @@ export type Pet = {
    */
   status: string;
   reward_debt: string | number;
-  /**
-   * Absolute timestamp, in nanoseconds, at which the pet starves — NOT a
-   * remaining duration, despite the name.
-   */
-  time_until_starving: number;
+  /** v1: an absolute nanosecond timestamp, despite the name. */
+  time_until_starving?: number;
+  /** v2: the same value, named for what it is. */
+  starves_at?: string | number;
   time_pet_born?: number;
   items?: PetItem[];
   pet_need_evolution_item?: boolean;
@@ -73,8 +96,17 @@ export const PET_SPECIES = [
  * game contract gets NEAR pricing.
  */
 
+/** Evolution phase, under either contract's field name. */
+export const evolutionPhase = (pet: Pet) => pet.evolution_phase ?? pet.pet_evolution_phase ?? 1;
+
 export const petImage = (pet: Pet) =>
-  `/assets/animation/${pet.category}/${pet.pet_evolution_phase}.gif`;
+  `/assets/animation/${pet.category}/${evolutionPhase(pet)}.gif`;
+
+/** The starving deadline in epoch milliseconds, under either field name. */
+export function starvesAtMs(pet: Pet): number {
+  const raw = pet.starves_at ?? pet.time_until_starving ?? 0;
+  return Number(raw) / 1e6;
+}
 
 export type PetStatus = 'HAPPY' | 'HUNGRY' | 'DYING';
 
@@ -86,8 +118,7 @@ export type PetStatus = 'HAPPY' | 'HUNGRY' | 'DYING';
  * the countdown read about 5,460 years.
  */
 export function secondsUntilStarving(pet: Pet, nowMs = Date.now()): number {
-  const deadlineMs = pet.time_until_starving / 1e6;
-  return Math.max(0, Math.round((deadlineMs - nowMs) / 1000));
+  return Math.max(0, Math.round((starvesAtMs(pet) - nowMs) / 1000));
 }
 
 /**

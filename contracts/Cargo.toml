@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["pet-stake", "mint-router"]
+members = ["game", "pet-stake", "mint-router"]
 
 [workspace.package]
 version = "0.1.0"

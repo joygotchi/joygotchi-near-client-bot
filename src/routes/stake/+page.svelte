@@ -19,7 +19,7 @@
     stakePet,
     unstakePet
   } from '#lib/economy/stake';
-  import { petImage, type Pet } from '#lib/game/pets';
+  import { evolutionPhase, petImage, type Pet } from '#lib/game/pets';
   import { wallet } from '#lib/near/wallet.svelte';
   import {
     creditsPerDay,
@@ -50,16 +50,20 @@
     player.totalWeight > 0 ? (player.weight / player.totalWeight) * 100 : 0
   );
 
-  /** Rarity is not on-chain yet; derive a stand-in from stars so weights line up. */
+  /**
+   * v2 reports rarity for real. Against the v1 contract, which has no such
+   * field, fall back to a stand-in derived from stars so weights still line up.
+   */
   const rarityOf = (pet: Pet): Rarity =>
-    pet.star >= 9 ? 'legendary' : pet.star >= 6 ? 'epic' : pet.star >= 3 ? 'rare' : 'common';
+    pet.rarity ??
+    (pet.star >= 9 ? 'legendary' : pet.star >= 6 ? 'epic' : pet.star >= 3 ? 'rare' : 'common');
 
   const weightOf = (pet: Pet) =>
     petWeight({
       rarity: rarityOf(pet),
       level: pet.level,
       star: pet.star,
-      evolutionPhase: pet.pet_evolution_phase
+      evolutionPhase: evolutionPhase(pet)
     });
 
   async function toggleStake(pet: Pet) {

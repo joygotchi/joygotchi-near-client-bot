@@ -1,13 +1,17 @@
 # Game contract v2 — interface spec
 
-Everything in this repository is finished and tested. None of it works end to
-end, because all four integration points live in the pet contract and the
-deployed one has none of them.
+> **Status: implemented.** The contract lives at
+> [`contracts/game`](../contracts/game) with 32 unit tests. This document is
+> now the specification it was built to, kept as the reference for what each
+> method is for and which decisions were taken. Section 8 records how the five
+> open questions were resolved.
 
-This is the contract that unblocks it. It is written to be implementable
-without reading the rest of the repo: every signature here is the one the
-deployed `pet-stake` and `mint-router` actually call, copied from their
-`#[ext_contract]` traits.
+Everything else in this repository was finished and tested before this existed,
+and none of it worked end to end, because all four integration points live in
+the pet contract and the deployed `game.joyv1.near` has none of them.
+
+Every signature here is the one `pet-stake` and `mint-router` actually call,
+copied from their `#[ext_contract]` traits.
 
 ---
 
@@ -82,7 +86,8 @@ Two traps worth carrying forward into v2:
 
 ## 2 · Extend or rewrite
 
-**Recommendation: rewrite, and migrate the 20 pets.**
+**Decided: rewrite, and migrate the 20 pets.** Implemented in
+[`contracts/game`](../contracts/game); `import_pets` does the migration.
 
 The case for it:
 
@@ -159,14 +164,12 @@ fn nft_tokens_for_owner(&self, account_id: AccountId, from_index: Option<U128>, 
 `token_id` should be the decimal `pet_id` as a string, so the two id spaces
 never diverge.
 
-> **A staked pet must not be transferable.** `nft_transfer` and
-> `nft_approve` have to reject any pet for which
-> `stake.is_staked(pet_id)` is true. Because that is a view on another
-> contract, the practical implementation is a local mirror: `pet-stake`
-> already emits `pet_staked` / `pet_unstaked` events, so either keep a
-> `staked: LookupSet<u64>` updated by a privileged `set_staked(pet_id, bool)`
-> that only `pet-stake` may call, or accept a one-block race. **Decision
-> needed** — see section 8.
+> **A staked pet must not be transferable**, and the implementation mirrors
+> the flag rather than reading it across contracts, because a transfer has to
+> be atomic and a cross-contract view cannot be. `pet-stake` calls
+> `set_locked(pet_id, bool)` from `internal_stake` and `unstake_pet`; nobody
+> else may call it. `nft_transfer`, `nft_transfer_call` and `nft_approve` all
+> go through `assert_transferable`.
 
 ### 4.2 Pet lifecycle
 
@@ -256,18 +259,25 @@ profit. Losing costs the wager plus six hours wounded, and nothing more.
 
 ### 4.5 Items and feeding
 
-Items are credit items in `pet-stake` now. The game contract's own shop is
-priced in a token that never existed, so either reprice it in NEAR:
+The shop is repriced in NEAR rather than retired, keeping the v1 ids and names
+so explorers and old clients still make sense:
 
 ```rust
-#[payable] fn buy_item(&mut self, pet_id: u64, item_id: u16);  // attached deposit = price
+#[payable] fn buy_item(&mut self, pet_id: u64, item_id: u16);  // deposit = price
 ```
 
-…or drop it and let feeding happen through `pet-stake`'s credit actions. The
-client currently surfaces neither. **Decision needed** — section 8.
+| id | Item | Price | Effect |
+|---|---|---|---|
+| 1 | Beef | 0.10 NEAR | +3h, 30 XP |
+| 2 | Water | 0.05 NEAR | +3h, 10 XP |
+| 3 | Shield | 0.20 NEAR | blocks one incoming attack |
+| 4 | Holy Water | 0.50 NEAR | +3h, and revives a starved pet |
 
-Whatever is chosen, feeding must move the starving deadline, and the method
-that does it has to re-sync weight if it also grants XP that levels the pet.
+Banked food is capped at seven days, so a pet cannot be made effectively
+immortal in one sitting. Feeding that levels the pet re-syncs staking weight.
+
+Credit items in `pet-stake` (Tonic, Ward, Lens, Charm) are a separate set and
+unaffected.
 
 ---
 
@@ -331,20 +341,53 @@ Whether the 19 starved pets are revived as a courtesy is a product call.
 
 ---
 
-## 8 · Decisions needed before implementation
+## 8 · How the five decisions were resolved
 
-1. **Rewrite or extend.** Section 2 recommends rewrite.
-2. **The battle formula.** There is none today, and `attack` cannot be written
-   without it. Deterministic from ATK/DEF and level, or seeded from
-   `env::random_seed()`? Note that 1Click-style determinism matters here: a
-   player should be able to see why they lost.
-3. **Transfer-vs-staked enforcement.** A mirrored `staked` set with a
-   privileged setter, or accept a one-block race where a pet could be
-   transferred in the same block it is staked.
-4. **The $JOY shop.** Reprice `buy_item` in NEAR, or retire it and feed only
-   through credits.
-5. **Who assigns rarity.** Mint-time roll, or a property of `category`? Weight
-   — and therefore income and drop rate — hangs on this.
+Each is marked `DECISION:` in the source where it is implemented.
+
+**1 · Rewrite or extend → rewrite.** 20 pets and 6 owners is a migration that
+fits in one call, and `rarity` plus NEP-171 would have been most of a rewrite
+anyway.
+
+**2 · The battle formula → mostly deterministic, with a band.** Each side
+scores its effective attack against the other's effective defence, then a
+±15% roll from the block seed is applied:
+
+```
+attacker_score = atk × (1 + level×0.05) × (1 + star×0.10) × roll(0.85..1.15)
+defender_score = def × (1 + level×0.04) × (1 + star×0.10) × roll(0.85..1.15)
+```
+
+Both scores go into the `battle_rolled` event, so a player can see why they
+lost. The band stops the matchup being perfectly solvable in advance without
+making the result a coin flip — which matters, because the seed is not
+manipulation-proof.
+
+Pets had no combat stats at all under v1; the client hard-coded 100/100 for
+every pet. ATK and DEF are now real fields, seeded from rarity and growing
+with level.
+
+**3 · Transfer-vs-staked → a mirrored flag.** `set_locked`, callable only by
+`pet-stake`, which fires it from `internal_stake` and `unstake_pet`. The
+promise is fire-and-forget: a failed lock leaves a pet transferable briefly,
+which is repairable, whereas blocking a stake on a lock call is not worth the
+coupling.
+
+**4 · The shop → repriced in NEAR**, see section 4.5.
+
+**5 · Rarity → rolled at mint, with published odds.**
+
+| Rarity | Odds | Base ATK / DEF |
+|---|---|---|
+| Common | 70% | 100 / 100 |
+| Rare | 20% | 130 / 125 |
+| Epic | 8% | 170 / 160 |
+| Legendary | 2% | 220 / 200 |
+
+`get_mint_odds` returns them on-chain so a client never has to hard-code them.
+This is also what makes minting a second pet a real decision rather than a
+formality — rarity sets base weight, which sets both credit income and the
+item drop rate.
 
 ---
 
@@ -364,5 +407,11 @@ The integration is done when all of these pass on testnet:
 - [ ] A starved pet reads as dying from a derived status, not a stored one.
 - [ ] The countdown on the pet screen shows a plausible time.
 
-Contracts in this repo are unit-tested (49 tests), but nothing exercises the
-cross-contract path — these are the first tests that will.
+The three contracts are unit-tested (81 tests, 32 of them in `game`), but
+nothing exercises the cross-contract path — these are the first tests that
+will.
+
+What the unit tests do pin down, because it is the easiest thing to get wrong:
+`attack` builds the settlement promise and applies **nothing**, and
+`on_battle_settled` with an `Err` result leaves the loser's stars and clock
+untouched.
