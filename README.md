@@ -32,7 +32,9 @@ and Meteor Wallet), **NEAR Intents 1Click** for multichain payments, and
 - **Mine** for credits every six hours, if you have a pet at work.
 
 The full economic design, with worked numbers and the open issues, is in
-[docs/ECONOMY.md](docs/ECONOMY.md).
+[docs/ECONOMY.md](docs/ECONOMY.md). The pet contract this all plugs into does
+not exist yet — its interface is specified in
+[docs/GAME_CONTRACT_V2.md](docs/GAME_CONTRACT_V2.md).
 
 ## Getting started
 
@@ -180,3 +182,23 @@ could do is here, with these changes:
 | referral via Telegram `start_param` | `?ref=` on the URL |
 | "1 JOY" labels with no token behind them | NEAR in, AI credit out — two real resources |
 | — | the AI Lab, AI feeding, item drops, an item market |
+
+## Not done
+
+Everything here is finished and tested, and none of it works end to end,
+because all four integration points live in the pet contract and the deployed
+one has none of them: it is not NEP-171, and it has no `get_pet_attrs`,
+no `create_pet_for`, and no call to `report_battle` from `attack`.
+
+That interface is written out in
+[docs/GAME_CONTRACT_V2.md](docs/GAME_CONTRACT_V2.md), together with the five
+decisions that have to be made before it can be implemented and the acceptance
+criteria for calling the integration done.
+
+Until then `admin_set_pet` lets an operator push pet attributes by hand, and
+the client blocks the attack button for staked pets — but only the contract can
+actually enforce it.
+
+Smaller things, in priority order: the `/api/ai/chat` replay guard is in-memory
+and needs Redis or Vercel KV before production; auto-feed has an on-chain
+budget and nothing that spends it; there is no CI.

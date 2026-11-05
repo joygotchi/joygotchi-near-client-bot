@@ -397,7 +397,9 @@ telling the player what something will cost before they sign.
 
 Written down because they are real, not because they are solved:
 
-- **The game contract does not call our views yet.** `pet-stake` exposes
+- **The game contract does not call our views yet** — see
+  [GAME_CONTRACT_V2.md](GAME_CONTRACT_V2.md) for the interface it needs.
+  `pet-stake` exposes
   `is_attackable(pet_id)` and `report_battle(...)`, and the client respects
   them, but the deployed game contract knows about neither. Until it does, a
   determined player can attack a staked or warded pet by talking to the game

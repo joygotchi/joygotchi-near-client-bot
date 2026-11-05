@@ -94,6 +94,9 @@ number it returns is what a claim right now would actually pay.
 
 ### What it needs from the game contract
 
+Specified in full, with the call ordering that matters, in
+[../docs/GAME_CONTRACT_V2.md](../docs/GAME_CONTRACT_V2.md).
+
 ```rust
 fn get_pet_attrs(&self, pet_id: u64) -> (AccountId, PetAttrs);
 
