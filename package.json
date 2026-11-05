@@ -12,7 +12,9 @@
     "preview": "vite preview",
     "prepare": "svelte-kit sync",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
-    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
+    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@hot-labs/near-connect": "^0.12.0",
@@ -28,7 +30,8 @@
     "svelte-check": "^4.7.8",
     "tailwindcss": "^4.3.4",
     "typescript": "^6.0.0",
-    "vite": "^8.0.12"
+    "vite": "^8.0.12",
+    "vitest": "^5.1.0"
   },
   "packageManager": "pnpm@10.12.4"
 }
