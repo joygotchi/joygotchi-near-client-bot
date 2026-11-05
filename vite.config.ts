@@ -1,31 +1,18 @@
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
-import { nodePolyfills } from 'vite-plugin-node-polyfills';
-import tailwindcss from 'tailwindcss';
-import { fileURLToPath, URL } from "url";
+import adapter from '@sveltejs/adapter-vercel';
+import { sveltekit } from '@sveltejs/kit/vite';
+import tailwindcss from '@tailwindcss/vite';
+import { defineConfig } from 'vite';
 
-// https://vitejs.dev/config/
 export default defineConfig({
-  plugins: [react(),
-    nodePolyfills({
-      // Include only necessary polyfills
-      include: ['buffer', 'process'],
-      globals: {
-        Buffer: true,
-        global: true,
-        process: true
-      }
+  plugins: [
+    tailwindcss(),
+    sveltekit({
+      adapter: adapter()
     })
   ],
-  css:{
-    postcss:{
-      plugins: [tailwindcss()]
-    }
-  },
-  resolve:{
-    alias:[
-      { find: '@', replacement: fileURLToPath(new URL('./src', import.meta.url)) }
-    ]
-  },
-  base:"/"
+  server: {
+    host: true,
+    // The Telegram Mini App is served through a tunnel in dev (ngrok / cloudflared).
+    allowedHosts: true
+  }
 });
