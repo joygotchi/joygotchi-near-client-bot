@@ -398,38 +398,44 @@ Deployed and exercised on testnet with
 
 | | |
 |---|---|
-| game | `jg-game-72362.testnet` |
-| pet-stake | `jg-stake-72362.testnet` |
-| mint-router | `jg-mint-72362.testnet` |
+| game | `jg-game-5656.testnet` |
+| pet-stake | `jg-stake-5656.testnet` |
+| mint-router | `jg-mint-5656.testnet` |
+
+A fresh set of accounts, because the `Game` struct gained `listings`,
+`market_fee_bps` and `treasury` — see the note on Borsh below.
 
 | Criterion | Result |
 |---|---|
 | `stake_pet` succeeds without `admin_set_pet`, refusing a pet the caller does not own | **pass** — `get_pet_attrs` resolved across contracts, weight 100 |
-| A staked pet cannot be transferred | **pass** — `nft_transfer` reverts |
+| A staked pet cannot be transferred or listed | **pass** — with a readable error |
 | Attacking settles through `report_battle` and the callback applies the damage | **pass** |
-| A Star Charm is consumed and the star survives | not run — needs a pet with stars |
+| A pet sells for NEAR, fee to the treasury | **pass** — 1 NEAR, 0.025 fee |
+| A star is earned after three wins | partial — the streak advances correctly; three wins need three hours of attack cooldown |
 | Levelling a staked pet changes its credit rate | not run |
-| A starved pet reads as dying from a derived status | **pass** in unit tests; not reproduced live (no pet has starved yet) |
 | Paying ZEC through 1Click produces a pet | **not run** — needs a 1Click partner JWT |
-| The countdown shows a plausible time | **pass** — `seconds_until_starving` 86,349 on a fresh pet |
 
 ### The live run, in order
 
 ```
-create_pet            → pet_minted      pet 1, common, to jg-p2
+create_pet ×2         → pets 1 and 2, to two different owners
 stake_pet             → get_pet_attrs across contracts
-                      → pet_staked      weight 100
-                      → set_locked      back on the game contract
-nft_transfer (staked) → reverts
-claim_credits         → credits_claimed 111,111 micro-credits
+                      → pet_staked  weight 100
+                      → set_locked  back on the game contract
+list_pet (staked)     → "This pet is at work in the AI Lab — unstake it before selling"
 unstake_pet           → pet_unstaked + set_locked(false)
-attack                → battle_rolled   attacker 111 vs defender 86
-                      → report_battle   transferred 0, rake 0
-                      → battle_settled   winner +25 XP, loser wounded 6h
+attack                → battle_rolled   attacker 93 vs defender 95
+                      → the ATTACKER LOST
+                      → battle_settled  defender +25 XP, win_streak 1, wins_to_next_star 2
+                      → attacker wounded 6h, not attackable
+list_pet              → pet_listed      1 NEAR
+buy_pet               → pet_sold        fee 0.025 NEAR (2.5%)
+                      → ownership moved, listing cleared
 ```
 
-`transferred: 0` is correct, not a failure: the loser had no credits, and the
-contract takes whatever they can cover rather than refusing the fight.
+The attacker losing is worth noting rather than retrying: the ±15% band on an
+otherwise even matchup did exactly what it is for. Attacking is not a free win,
+which is the point of putting a wager behind it.
 
 ### One real problem, found only by deploying — now fixed
 
@@ -467,12 +473,15 @@ the game contract — which is its own evidence that the pass had been missing.
 `build.sh` now goes through `cargo near build` and refuses to run with
 cargo-near older than 0.22.
 
-### Adding a field to `Pet` breaks existing state
+### Changing a stored struct breaks existing state
 
-Worth recording before mainnet: `win_streak` was added to `Pet` in the same
-round, which changes the Borsh layout. The two pets already on testnet became
-unreadable, and a fresh one had to be minted to finish the checks above.
+This has now bitten twice. `win_streak` on `Pet` made the pets already on
+testnet unreadable; adding `listings`, `market_fee_bps` and `treasury` to the
+contract struct itself meant the whole deployment had to move to fresh
+accounts.
 
-On mainnet that is not acceptable. Any later change to `Pet` needs an
-`#[init(ignore_state)]` migration that reads the old layout, which means
-keeping the previous struct definition around to deserialise with.
+On testnet that costs a faucet call. On mainnet it is not an option, and it
+applies to any stored struct, not only `Pet`. Either freeze the layouts before
+the mainnet deploy, or accept that the first post-launch field addition is a
+migration exercise: an `#[init(ignore_state)]` entry point that keeps the
+previous struct definition around to deserialise with.
