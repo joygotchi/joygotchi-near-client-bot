@@ -200,20 +200,30 @@ The payment arrives from a bridge, not from the player's wallet, so the router
 has to be able to assign a pet to somebody other than the caller. It must also
 be set as `granter` on `pet-stake` for `buy_credits` to work.
 
-## Known issue: panic messages are invisible on-chain
+## Build through `cargo near`, not `cargo build`
 
-`require!`, `.expect()` and `env::panic_str` all surface as
-`WebAssembly trap: An 'unreachable' opcode was executed`, with no message.
-Confirmed at the RPC against a deployed hash matching the local build;
-`panic = "abort"` is not the cause.
+`build.sh` requires **cargo-near >= 0.22** and refuses to run without it.
 
-`cargo near build` refuses this toolchain's output with
-`Failed to validate wasm: error validating input`, so the cause is most likely
-Rust 1.97 emitting wasm features the NEAR VM rejects rather than anything in
-the contracts. Happy paths are unaffected.
+This is not a preference. cargo-near runs a `wasm-opt -O` post-step that its own
+help calls "required for correctness of build on rustc >= 1.82". Skipping it —
+which plain `cargo build --release --target wasm32-unknown-unknown` does — makes
+every panic on-chain degrade to a bare `unreachable` trap with the message lost,
+`require!`, `.expect()` and `env::panic_str` alike. That was issue #3, found
+only by deploying.
 
-Before mainnet: pin `rust-toolchain.toml` to a version `cargo near build`
-accepts and build through it.
+cargo-near older than 0.22 ships a wasm-opt that rejects the bulk-memory
+instructions rustc now emits from precompiled `std`, which is why the step had
+never run here. Disabling the target feature does not help; the instructions do
+not come from this code.
+
+The optimised builds are also about 20% smaller.
+
+### Changing `Pet` breaks existing state
+
+`Pet` is Borsh-serialised, so adding a field invalidates every stored pet.
+Adding `win_streak` made the two pets then on testnet unreadable. Before
+mainnet, any such change needs an `#[init(ignore_state)]` migration that keeps
+the old struct around to deserialise with.
 
 ## Testnet
 

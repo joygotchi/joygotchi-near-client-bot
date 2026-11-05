@@ -431,23 +431,48 @@ attack                → battle_rolled   attacker 111 vs defender 86
 `transferred: 0` is correct, not a failure: the loser had no credits, and the
 contract takes whatever they can cover rather than refusing the fight.
 
-### One real problem, found only by deploying
+### One real problem, found only by deploying — now fixed
 
-**Every error message is invisible on-chain.** `require!`, `.expect()` and even
-a direct `env::panic_str` all surface as:
+Every error message was invisible on-chain. `require!`, `.expect()` and even a
+direct `env::panic_str` all surfaced as:
 
 ```
 ExecutionError("WebAssembly trap: An `unreachable` opcode was executed.")
 ```
 
-Verified at the RPC, not just in the CLI, and verified against a deployed hash
-matching the local build. Removing `panic = "abort"` did not change it. The
-likely cause is the build pipeline rather than the contracts: `cargo near build`
-refuses this toolchain's output with `Failed to validate wasm: error validating
-input`, which points at Rust 1.97 emitting wasm features the NEAR VM rejects.
+The cause was the build, not the contracts: `cargo near build`'s own help says
+its `wasm-opt -O` post-step is **"required for correctness of build on rustc >=
+1.82"**, and `build.sh` was running plain
+`cargo build --release --target wasm32-unknown-unknown`, skipping it.
 
-Happy paths are unaffected — everything above ran — but a player who does
-something disallowed gets no reason why. **Fix before mainnet:** pin the
-toolchain in `rust-toolchain.toml` to a version `cargo near build` accepts and
-build through it, then re-run the two checks in this section that assert on
-message text.
+Running `cargo near build` surfaced the reason it had never been used here —
+`Bulk memory operations require bulk memory`, because rustc now emits
+`memory.fill` from precompiled `std` and the wasm-opt bundled with cargo-near
+0.13.4 rejects it. Disabling the target feature does not help, since the
+instructions come from std rather than from this code. Upgrading to cargo-near
+0.22 fixed it.
+
+Verified on testnet after rebuilding through `cargo near build`:
+
+| Site | Before | After |
+|---|---|---|
+| `require!` in game | `unreachable` | `Smart contract panicked: That pet belongs to someone else` |
+| `.expect()` in game | `unreachable` | `…panicked at game/src/lib.rs:180: No such pet` |
+| `require!` in pet-stake | `unreachable` | `Smart contract panicked: Nothing to claim yet` |
+| `require!` in mint-router | `unreachable` | `Smart contract panicked: This contract only accepts wNEAR` |
+
+The optimised builds are also about 20% smaller — 311 KB rather than 396 KB for
+the game contract — which is its own evidence that the pass had been missing.
+
+`build.sh` now goes through `cargo near build` and refuses to run with
+cargo-near older than 0.22.
+
+### Adding a field to `Pet` breaks existing state
+
+Worth recording before mainnet: `win_streak` was added to `Pet` in the same
+round, which changes the Borsh layout. The two pets already on testnet became
+unreadable, and a fresh one had to be minted to finish the checks above.
+
+On mainnet that is not acceptable. Any later change to `Pet` needs an
+`#[init(ignore_state)]` migration that reads the old layout, which means
+keeping the previous struct definition around to deserialise with.
