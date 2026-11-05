@@ -1,0 +1,221 @@
+@import 'tailwindcss';
+
+@theme {
+  --font-pixel: 'Silkscreen', sans-serif;
+
+  --color-sky-screen: #b8e3f8;
+  --color-panel: #e5f2f8;
+  --color-ink: #2d3c53;
+  --color-ink-deep: #304053;
+  --color-steel: #a9c6e4;
+  --color-steel-dark: #628ab4;
+  --color-ember: #f48f59;
+}
+
+@font-face {
+  font-family: 'Silkscreen';
+  font-weight: 400;
+  font-display: swap;
+  src: url('/font/Silkscreen-Regular.ttf');
+}
+
+@font-face {
+  font-family: 'Silkscreen';
+  font-weight: 700;
+  font-display: swap;
+  src: url('/font/Silkscreen-Bold.ttf');
+}
+
+html {
+  cursor: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAABFklEQVRYR9WXURLDIAhE6/0PbSdOtUpcd1Gnpv1KGpTHBpCE1/cXq+vrMph7dGvXZTtpfW10DCA5jrH1H0Jhs5E0hnZdCR+vb5S8Nn8mQCeS9BdSalYJqMBjAGzq59xAESN7VFVUgV8AZB/dZBR7QTFDCqGquvUBVVoEtgIwpQRzmANSFHgWQKExHdIrPeuMvQNDarXe6nC/AutgV3JW+6bgqQLeV8FekRtgV+ToDKEKnACYKsfZjjkam7a0ZpYTytwmgainpC3HvwBocgKOxqRjehoR9DFKNFYtOwCGYCszobeCbl26N6yyQ6g8X/Wex/rBPsNEV6qAMaJPMynIHQCoSqS9JSMmwef51LflTgCRszU7DvAGiV6mHWfsaVUAAAAASUVORK5CYII=),
+    auto;
+  color: #fff;
+}
+
+button,
+a {
+  cursor: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAzElEQVRYR+2X0Q6AIAhF5f8/2jYXZkwEjNSVvVUjDpcrGgT7FUkI2D9xRfQETwNIiWO85wfINfQUEyxBG2ArsLwC0jioGt5zFcwF4OYDPi/mBYKm4t0U8ATgRm3ThFoAqkhNgWkA0jJLvaOVSs7j3qMnSgXWBMiWPXe94QqMBMBc1VZIvaTu5u5pQewq0EqNZvIEMCmxAawK0DNkay9QmfFNAJUXfgGgUkLaE7j/h8fnASkxHTz0DGIBMCnBeeM7AArpUd3mz2x3C7wADglA8BcWMZhZAAAAAElFTkSuQmCC)
+      14 0,
+    pointer;
+}
+
+* {
+  font-family: var(--font-pixel);
+}
+
+body {
+  overscroll-behavior: none;
+}
+
+/* ── Layout helpers carried over from the React app ───────────────────────── */
+
+.layout {
+  height: 80vh;
+  @media screen and (min-width: 560px) {
+    height: 75vh;
+  }
+}
+
+.fix-header {
+  width: 100%;
+  @media screen and (min-width: 560px) {
+    width: 400px;
+  }
+}
+
+.fix-screen {
+  height: 75vh;
+  @media screen and (min-width: 560px) {
+    height: 100%;
+  }
+}
+
+.screen {
+  width: 100%;
+  height: 100%;
+  @media screen and (min-width: 560px) {
+    width: 400px;
+    height: 100%;
+  }
+}
+
+.mg {
+  top: 30%;
+  left: 46%;
+  width: 90px;
+  transform: rotateY(180deg);
+  @media screen and (min-width: 560px) {
+    top: 23%;
+    left: 50%;
+    width: 70px;
+  }
+}
+
+.responsive {
+  height: 250px;
+  @media screen and (min-width: 560px) {
+    height: 160px;
+  }
+}
+
+.pet {
+  width: 90px;
+  @media screen and (min-width: 560px) {
+    width: 70px;
+  }
+}
+
+.arrow-left {
+  top: 32%;
+  left: -30px;
+  width: 1.3rem;
+  height: 1.3rem;
+  @media screen and (min-width: 560px) {
+    left: -40px;
+    width: 1.2rem;
+    height: 1.2rem;
+  }
+}
+
+.arrow-right {
+  top: 32%;
+  right: -30px;
+  width: 1.3rem;
+  height: 1.3rem;
+  @media screen and (min-width: 560px) {
+    right: -40px;
+    width: 1.2rem;
+    height: 1.2rem;
+  }
+}
+
+.clear {
+  height: 80px;
+  @media screen and (min-width: 560px) {
+    height: 0;
+  }
+}
+
+.clean {
+  height: 120px;
+  @media screen and (min-width: 560px) {
+    height: 0;
+  }
+}
+
+.swap {
+  height: 90px;
+  @media screen and (min-width: 560px) {
+    height: 0;
+  }
+}
+
+/* ── Loading dots ──────────────────────────────────────────────────────────── */
+
+.dots-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  width: 100%;
+}
+
+.dot {
+  height: 15px;
+  width: 15px;
+  margin-right: 10px;
+  border-radius: 10px;
+  background-color: #fff;
+  animation: pulse 1.5s infinite ease-in-out;
+}
+
+.dot:last-child {
+  margin-right: 0;
+}
+
+.dot:nth-child(1) {
+  animation-delay: -0.3s;
+}
+
+.dot:nth-child(2) {
+  animation-delay: -0.1s;
+}
+
+.dot:nth-child(3) {
+  animation-delay: 0.1s;
+}
+
+@keyframes pulse {
+  0% {
+    transform: scale(0.8);
+    background-color: #ffffff63;
+    box-shadow: 0 0 0 0 rgba(178, 212, 252, 0.7);
+  }
+  50% {
+    transform: scale(1.2);
+    background-color: #fff;
+    box-shadow: 0 0 0 10px rgba(178, 212, 252, 0);
+  }
+  100% {
+    transform: scale(0.8);
+    background-color: #ffffff63;
+    box-shadow: 0 0 0 0 rgba(178, 212, 252, 0.7);
+  }
+}
+
+/* ── Progress bar used by the pet XP / credit meters ──────────────────────── */
+
+.meter {
+  height: 10px;
+  border-radius: 999px;
+  background-color: #ffffff55;
+  overflow: hidden;
+}
+
+.meter > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background-color: var(--color-ember);
+  transition: width 0.4s ease;
+}
