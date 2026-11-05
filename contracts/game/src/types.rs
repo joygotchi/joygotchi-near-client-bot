@@ -18,6 +18,15 @@ pub const ATTACKED_COOLDOWN_SECONDS: u64 = 60 * 60;
 pub const BASE_LEVEL_XP: u32 = 100;
 pub const MAX_LEVEL: u32 = 20;
 pub const MAX_STAR: u32 = 5;
+
+/// Consecutive wins that earn a star.
+///
+/// Stars are the PvP ladder: they are the one reward battling gives that
+/// staking cannot, and each one is +15% staking weight, so winning fights
+/// feeds the credit stream. They are also the reason a Star Charm is worth
+/// buying — before this there was no way to gain a star at all, so losing one
+/// was impossible and the charm protected nothing.
+pub const WINS_PER_STAR: u32 = 3;
 pub const MAX_EVOLUTION_PHASE: u8 = 4;
 
 /// Mirrors `pet-stake::Rarity`. The lowercase serde names are part of the
@@ -119,6 +128,8 @@ pub struct Pet {
     pub last_attacked: u64,
     /// Blocks exactly one incoming attack, then is spent.
     pub shield: u32,
+    /// Wins since the last defeat. At `WINS_PER_STAR` it converts to a star.
+    pub win_streak: u32,
     /// True while `pet-stake` has it at work. Set only by that contract.
     pub locked: bool,
 }
@@ -194,6 +205,9 @@ pub struct PetView {
     pub seconds_until_starving: U64,
     pub status: PetStatus,
     pub shield: u32,
+    pub win_streak: u32,
+    /// Wins still needed for the next star, or `null` at `MAX_STAR`.
+    pub wins_to_next_star: Option<u32>,
     pub locked: bool,
     pub born_at: U64,
     pub last_attack_used: U64,

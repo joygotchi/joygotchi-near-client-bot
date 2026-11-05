@@ -209,7 +209,10 @@ So losing a battle costs this instead:
 | Wager | 0.01 ACR, moved from loser to winner |
 | Rake | 5% of the pot → `sale_reserve`, never out of `epoch_budget` |
 | Wound | 6 hours unable to battle; an AI Tonic clears it at once |
-| Star | lost, unless a Star Charm absorbs it |
+| Star | lost, unless a Shield or Star Charm absorbs it |
+| Streak | reset, so progress towards the next star goes too |
+
+The winner takes 25 XP and a win on their streak.
 
 The wager is a **transfer, not a destruction**: the loser's loss is the winner's
 gain, so PvP is zero-sum between players rather than eating into the asset base
@@ -218,6 +221,29 @@ sales, mining and the faucet, so PvP never dilutes stakers.
 
 A loser who cannot cover the wager still loses the fight — the pot is simply
 whatever they had. Battles never fail for being poor.
+
+### Stars: the PvP ladder
+
+Stars are the one reward battling gives that staking cannot.
+
+```
+3 consecutive wins → +1 star (capped at 5)
+1 defeat           → −1 star, and the streak resets to zero
+```
+
+Each star is **+15% staking weight** and **+10% on both ATK and DEF**, so
+winning fights feeds the credit stream and makes the next fight easier. A Star
+Charm (0.015 ACR) saves one on a single defeat, and a Shield absorbs the hit
+before the star does.
+
+This is what makes battling worth the opportunity cost. A staked pet earns
+steadily and risks nothing; a battling pet earns a 0.01 ACR wager and a shot at
+a compounding weight bonus, against six hours wounded and a star.
+
+Stars were inert until this landed: a pet was minted at zero, nothing ever
+raised it, and the three tests covering star loss each set `star = 2` by hand —
+which is why they passed and why nobody noticed. The Star Charm protected
+something that could not exist.
 
 ### Staked pets are off limits in both directions
 
@@ -389,6 +415,7 @@ telling the player what something will cost before they sign.
 | `battle_wager` | 0.01 ACR | treasury, `set_battle_params` |
 | `battle_rake_bps` | 500 (5%, capped at 20%) | treasury, `set_battle_params` |
 | ward / wound | 24h / 6h | fixed in `types.rs` |
+| wins per star | 3, capped at 5 stars | fixed in `WINS_PER_STAR` / `MAX_STAR` |
 | mint price | 2 wNEAR | `mint-router::set_mint_price` |
 | credit decimals | 6 | fixed |
 | rarity weights | 100 / 160 / 260 / 400 | fixed in `Rarity::base_weight` |

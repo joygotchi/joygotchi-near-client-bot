@@ -287,6 +287,7 @@ impl Game {
             last_attack_used: 0,
             last_attacked: 0,
             shield: 0,
+            win_streak: 0,
             locked: false,
         };
 
@@ -582,14 +583,35 @@ impl Game {
         if let Some(mut winner) = self.pets.get(&winner_pet_id) {
             winner.last_attack_used = now;
             let levelled = self.grant_xp(&mut winner, 25);
+
+            // Stars are earned here and nowhere else. Three wins in a row is
+            // one star, and a single defeat takes it back — so the ladder is
+            // worth climbing and worth defending.
+            let mut starred = false;
+            if winner.star < MAX_STAR {
+                winner.win_streak += 1;
+                if winner.win_streak >= WINS_PER_STAR {
+                    winner.win_streak = 0;
+                    winner.star += 1;
+                    starred = true;
+                    self.log_event(
+                        "star_earned",
+                        json!({ "pet_id": winner_pet_id, "star": winner.star }),
+                    );
+                }
+            }
+
             self.pets.insert(&winner_pet_id, &winner);
-            if levelled {
+            // A star is +15% staking weight, so it has to be re-read there.
+            if levelled || starred {
                 self.sync_weight(&winner);
             }
         }
 
         if let Some(mut loser) = self.pets.get(&loser_pet_id) {
             loser.last_attacked = now;
+            // Any progress towards the next star is lost with the fight.
+            loser.win_streak = 0;
 
             if loser.shield > 0 {
                 // A Shield absorbs the hit itself, before anything else.
@@ -686,6 +708,12 @@ impl Game {
             seconds_until_starving: U64(pet.starves_at.saturating_sub(now) / NANOS_PER_SECOND),
             status: pet.status(now),
             shield: pet.shield,
+            win_streak: pet.win_streak,
+            wins_to_next_star: if pet.star >= MAX_STAR {
+                None
+            } else {
+                Some(WINS_PER_STAR - pet.win_streak)
+            },
             locked: pet.locked,
             born_at: U64(pet.born_at),
             last_attack_used: U64(pet.last_attack_used),
@@ -810,6 +838,7 @@ impl Game {
                 last_attack_used: 0,
                 last_attacked: 0,
                 shield: 0,
+                win_streak: 0,
                 locked: false,
             };
 
@@ -1343,6 +1372,104 @@ mod tests {
             rake: U128(500),
             star_protected,
         }
+    }
+
+    /// Win `times` battles against a fresh opponent each time, so the win
+    /// streak builds the way it would in play.
+    fn win_battles(contract: &mut Game, winner_pet: u64, times: u32) {
+        for i in 0..times {
+            testing_env!(ctx("game.near".parse().unwrap(), 100 + i as u64, 0).build());
+            let loser = mint(contract, bob(), 100 + i as u64);
+            contract.on_battle_settled(winner_pet, loser, Ok(outcome(false)));
+        }
+    }
+
+    #[test]
+    fn three_wins_earn_a_star() {
+        let mut contract = deploy();
+        let pet_id = mint(&mut contract, alice(), 100);
+
+        assert_eq!(contract.get_pet(pet_id).unwrap().star, 0);
+        assert_eq!(contract.get_pet(pet_id).unwrap().wins_to_next_star, Some(3));
+
+        win_battles(&mut contract, pet_id, 2);
+        let after_two = contract.get_pet(pet_id).unwrap();
+        assert_eq!(after_two.star, 0, "two wins is not enough");
+        assert_eq!(after_two.win_streak, 2);
+        assert_eq!(after_two.wins_to_next_star, Some(1));
+
+        win_battles(&mut contract, pet_id, 1);
+        let after_three = contract.get_pet(pet_id).unwrap();
+        assert_eq!(after_three.star, 1, "the third win earns it");
+        assert_eq!(after_three.win_streak, 0, "and the streak restarts");
+    }
+
+    #[test]
+    fn a_defeat_wipes_the_streak_and_takes_a_star() {
+        let mut contract = deploy();
+        let pet_id = mint(&mut contract, alice(), 100);
+        let rival = mint(&mut contract, bob(), 100);
+
+        // Earn one star, then build towards the next.
+        win_battles(&mut contract, pet_id, 4);
+        let before = contract.get_pet(pet_id).unwrap();
+        assert_eq!(before.star, 1);
+        assert_eq!(before.win_streak, 1);
+
+        // Now lose.
+        testing_env!(ctx("game.near".parse().unwrap(), 200, 0).build());
+        contract.on_battle_settled(rival, pet_id, Ok(outcome(false)));
+
+        let after = contract.get_pet(pet_id).unwrap();
+        assert_eq!(after.star, 0, "the star is lost");
+        assert_eq!(after.win_streak, 0, "and so is the progress towards the next");
+    }
+
+    #[test]
+    fn a_star_charm_saves_an_earned_star() {
+        let mut contract = deploy();
+        let pet_id = mint(&mut contract, alice(), 100);
+        let rival = mint(&mut contract, bob(), 100);
+
+        win_battles(&mut contract, pet_id, 3);
+        assert_eq!(contract.get_pet(pet_id).unwrap().star, 1);
+
+        testing_env!(ctx("game.near".parse().unwrap(), 200, 0).build());
+        contract.on_battle_settled(rival, pet_id, Ok(outcome(true)));
+
+        assert_eq!(
+            contract.get_pet(pet_id).unwrap().star,
+            1,
+            "the charm is what makes this purchase worth anything"
+        );
+    }
+
+    #[test]
+    fn stars_stop_at_the_cap() {
+        let mut contract = deploy();
+        let pet_id = mint(&mut contract, alice(), 100);
+
+        win_battles(&mut contract, pet_id, WINS_PER_STAR * MAX_STAR + 6);
+
+        let pet = contract.get_pet(pet_id).unwrap();
+        assert_eq!(pet.star, MAX_STAR);
+        assert_eq!(pet.wins_to_next_star, None, "nothing left to earn");
+    }
+
+    #[test]
+    fn stars_raise_combat_strength() {
+        let mut contract = deploy();
+        let pet_id = mint(&mut contract, alice(), 100);
+        let before = contract.get_pet(pet_id).unwrap().effective_atk.0;
+
+        win_battles(&mut contract, pet_id, 3);
+        let after = contract.get_pet(pet_id).unwrap();
+
+        assert_eq!(after.star, 1);
+        assert!(
+            after.effective_atk.0 > before,
+            "a star has to mean something in a fight"
+        );
     }
 
     #[test]

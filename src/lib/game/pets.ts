@@ -49,6 +49,10 @@ export type Pet = {
   pet_shield?: number;
   /** v2 only: blocks one attack. */
   shield?: number;
+  /** v2 only: consecutive wins since the last defeat. */
+  win_streak?: number;
+  /** v2 only: wins still needed for the next star, `null` at the cap. */
+  wins_to_next_star?: number | null;
   /** v2 only: true while the pet is staked. */
   locked?: boolean;
   /**
@@ -109,6 +113,19 @@ export function starvesAtMs(pet: Pet): number {
 }
 
 export type PetStatus = 'HAPPY' | 'HUNGRY' | 'DYING';
+
+/** Consecutive wins that earn a star. Mirrors `WINS_PER_STAR` in the contract. */
+export const WINS_PER_STAR = 3;
+
+/**
+ * How close a pet is to its next star, or `null` when it is capped or the
+ * contract does not report streaks (v1).
+ */
+export function starProgress(pet: Pet): { streak: number; needed: number } | null {
+  if (pet.win_streak === undefined) return null;
+  if (pet.wins_to_next_star === null) return null;
+  return { streak: pet.win_streak, needed: pet.wins_to_next_star ?? WINS_PER_STAR };
+}
 
 /**
  * Seconds left before the pet starves.

@@ -36,6 +36,15 @@ the five design decisions taken along the way.
 | `get_pet` / `get_all_pet_metadata` / `get_pets_for_owner` | view | status is derived, not stored |
 | NEP-171 core, enumeration, approval | | `token_id` is the decimal `pet_id` |
 
+### Stars
+
+Earned nowhere else: three consecutive wins is one star, a single defeat takes
+it and resets the streak. Each star is +15% staking weight and +10% on ATK and
+DEF, so `on_battle_settled` re-syncs weight when one changes.
+
+Before this, `star` was only ever decremented — pets minted at zero, so losing
+one was impossible and the Star Charm protected nothing.
+
 ### The ordering in `attack`
 
 ```

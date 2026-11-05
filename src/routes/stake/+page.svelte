@@ -51,12 +51,14 @@
   );
 
   /**
-   * v2 reports rarity for real. Against the v1 contract, which has no such
-   * field, fall back to a stand-in derived from stars so weights still line up.
+   * v2 reports rarity for real. v1 has no such field and every pet on it is
+   * star 0, so there is nothing to derive it from — `common` is the honest
+   * answer rather than a guess.
+   *
+   * This used to read stars at thresholds of 9, 6 and 3, which `MAX_STAR = 5`
+   * made unreachable. See issue #12.
    */
-  const rarityOf = (pet: Pet): Rarity =>
-    pet.rarity ??
-    (pet.star >= 9 ? 'legendary' : pet.star >= 6 ? 'epic' : pet.star >= 3 ? 'rare' : 'common');
+  const rarityOf = (pet: Pet): Rarity => pet.rarity ?? 'common';
 
   const weightOf = (pet: Pet) =>
     petWeight({
