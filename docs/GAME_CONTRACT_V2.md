@@ -711,6 +711,31 @@ after    total_weight 100  staked_pets 1  total_distributed 244399  total_spent 
 `contracts/migrate-testnet.sh` is that path; `deploy-testnet.sh` still runs
 `new` and is for fresh accounts only, which its header now says.
 
+### A sink that charged for nothing — removed
+
+`revive` was seeded into `pet-stake`'s `prices` at 1 credit and listed in the
+client's "What credits buy" panel, and **no contract implemented it**. There is
+no `revive` method anywhere in the three contracts. The panel is a price list
+with no buttons, so nobody was ever charged, but a hand-made
+`spend_credits("revive")` would have debited a whole credit and done nothing —
+the most expensive sink in the game, for no effect.
+
+Reviving a starved pet does work, by the other rail: the game contract's Holy
+Water (item 4, 0.50 NEAR) and its `is_revival` flag, which is the only thing in
+the system that takes a pet back past its deadline. A second, credit-priced way
+to do the same thing was never needed, which is presumably why nobody wrote it.
+
+Same shape as the two findings above it — a price, a UI promise, and nothing
+behind them — and the third in this sweep after `award_xp` with no caller and
+`auto_feed_budget` with no spender.
+
+Removing it from `new`'s seed only fixes fresh deployments: the price lives in
+contract state. So `remove_action_price(action)` is new, owner-only, and
+`set_action_price(action, 0)` is **not** a substitute — zero passes
+`amount >= price` and `balance >= price`, so the action stays live and merely
+becomes free. A unit test pins that distinction down so nobody simplifies the
+method away.
+
 ### Smaller things
 
 - **Pending credits are not spendable.** `harvest` folds earnings into

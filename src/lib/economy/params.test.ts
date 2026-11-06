@@ -150,6 +150,23 @@ describe('sinks and items', () => {
     }
   });
 
+  // The seeded `prices` in `PetStake::new` (contracts/pet-stake/src/lib.rs),
+  // which is the authority: an action the client offers and the contract does
+  // not know is refused with "Unknown action", and one the contract prices and
+  // the client never shows is a sink nobody can reach.
+  it('offers exactly the actions the staking contract prices', () => {
+    expect(Object.keys(SINKS).sort()).toEqual(
+      ['ai_feed', 'auto_feed', 'chat', 'craft_item', 'evolve', 'train'].sort()
+    );
+  });
+
+  // `revive` was listed at 1 ACR and no contract method ever implemented it,
+  // so buying it would have debited a balance and done nothing. Reviving a
+  // starved pet is the game contract's Holy Water, paid for in NEAR.
+  it('no longer advertises revive', () => {
+    expect(Object.keys(SINKS)).not.toContain('revive');
+  });
+
   it('keeps a feed affordable against what a lone staker earns in a day', () => {
     // Under one feed a day was the problem with the original 0.02 pricing.
     const daily = creditsPerDay(100, 5_000, 500);

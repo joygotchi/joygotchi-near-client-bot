@@ -97,7 +97,6 @@ export type CreditAction =
   | 'evolve'
   | 'craft_item'
   | 'chat'
-  | 'revive'
   | 'auto_feed';
 
 export type SinkSpec = {
@@ -115,6 +114,12 @@ export type SinkSpec = {
  * Every credit sink. The ones marked `usesInference` really do spend NEAR AI
  * compute, which is why they cost credits at all: the sink is matched
  * by a real cost, so the economy cannot drift into pure inflation.
+ *
+ * Every entry here must have something on chain that carries it out. `revive`
+ * used to be listed at 1 ACR with no contract method behind it, which made the
+ * client advertise a purchase that would have debited a balance and done
+ * nothing. Reviving a starved pet is the game contract's Holy Water, bought
+ * with NEAR — see `is_revival` in `#lib/game/pets`.
  */
 export const SINKS: Record<CreditAction, SinkSpec> = {
   ai_feed: {
@@ -156,13 +161,6 @@ export const SINKS: Record<CreditAction, SinkSpec> = {
     credits: 0.001,
     description: 'One message to your pet, answered by NEAR AI with the pet’s own personality.',
     usesInference: true
-  },
-  revive: {
-    action: 'revive',
-    label: 'Revive',
-    credits: 1,
-    description: 'Bring a dying pet back to full health.',
-    usesInference: false
   },
   auto_feed: {
     action: 'auto_feed',

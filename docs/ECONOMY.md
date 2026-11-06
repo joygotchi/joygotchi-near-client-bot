@@ -130,8 +130,25 @@ treasury raises the number on-chain with `set_epoch_budget`.
 | **Craft item** | 0.02 ACR | yes | An item rolled from your pet's own history |
 | **Talk to pet** | 0.001 ACR | yes | One message, answered in the pet's voice |
 | **Evolve** | 0.50 ACR | no | Next evolution phase — permanently more weight and a better drop rate |
-| **Revive** | 1.00 ACR | no | Bring a dying pet back |
 | **Auto-feed** | 0.015 ACR | no | The pet feeds itself while you are away |
+
+Every row has something on chain that carries it out. That is the rule the
+table is kept to, and it is a rule because it was broken: **Revive** sat here
+at 1.00 ACR, with a price seeded in `pet-stake` and a line in the client's
+"What credits buy" list, and no contract anywhere implemented it. Buying it
+would have debited a credit balance and done nothing.
+
+Reviving a starved pet does work, through the other rail: the game contract's
+Holy Water (item 4, 0.50 NEAR), whose `is_revival` flag is the only thing in
+the system that brings a pet back past its deadline. There was never a reason
+for a second, credit-priced way to do the same thing, which is presumably why
+nobody wrote one.
+
+Removing the row is not enough on its own: the price lives in contract
+*state*, so a running deployment keeps it until the owner calls
+`remove_action_price("revive")`. Setting the price to zero does **not** retire
+a sink — zero passes every check in `spend_credits`, so the action stays live
+and merely becomes free.
 
 ### On the price of a feed
 
