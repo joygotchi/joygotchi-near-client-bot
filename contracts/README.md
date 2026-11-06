@@ -102,6 +102,7 @@ using the usual accumulator pattern.
 | `set_epoch_budget(amount)` | owner | **the one number that sets total emission** |
 | `fund_reserve(credits)` | owner | record credits actually bought on NEAR AI |
 | `set_action_price(action, credits)` | owner | keep in step with `src/lib/economy/params.ts` |
+| `remove_action_price(action)` | owner | retire a sink; a price of **0** does not — zero stays spendable, merely free |
 | `set_item_price(item_id, credits)` | owner | same |
 | `set_mining_reward` / `set_market_rake_bps` / `set_granter` | owner | |
 | `set_battle_params(wager, rake_bps)` | owner | rake capped at 20% |
