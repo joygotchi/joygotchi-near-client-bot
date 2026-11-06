@@ -20,6 +20,25 @@ const decimal = (fallback: string) => (value: string | undefined) => {
   return raw;
 };
 
+/**
+ * A NEAR ed25519 secret key, or empty. Shape only — the key is not used here.
+ *
+ * Length is the check that earns its place: a NEAR *public* key is 32 bytes
+ * (~44 characters) and looks close enough to paste by mistake, and a key that
+ * wrong fails at signing time with a base58 error rather than at startup.
+ */
+const secretKey = () => (value: string | undefined) => {
+  const raw = (value ?? '').trim();
+  if (raw === '') return '';
+  if (!/^(ed25519:)?[1-9A-HJ-NP-Za-km-z]{80,90}$/.test(raw)) {
+    throw new Error(
+      'expected a 64-byte NEAR secret key as "ed25519:<base58>" — a 32-byte ' +
+        'public key or a credentials JSON file is not one'
+    );
+  }
+  return raw;
+};
+
 export const variables = defineEnvVars({
   // ── Public: NEAR ────────────────────────────────────────────────────────────
   PUBLIC_NEAR_NETWORK: {
@@ -125,5 +144,23 @@ export const variables = defineEnvVars({
   NEAR_AI_MODEL: {
     schema: withDefault('zai-org/GLM-5.1-FP8'),
     description: 'Default model used for pet AI interactions.'
+  },
+
+  // ── Private: the feed-XP oracle key ─────────────────────────────────────────
+  NEAR_ORACLE_ACCOUNT_ID: {
+    schema: optional(),
+    description:
+      'Account whose key signs pet-stake::award_feed_xp, so a feed raises the ' +
+      'pet\'s XP on chain. Must match the staking contract\'s `oracle` — read ' +
+      'it back with `get_config`. Leave empty and feeds still work, but the XP ' +
+      'is only reported to the browser and never written.'
+  },
+  NEAR_ORACLE_PRIVATE_KEY: {
+    schema: secretKey(),
+    description:
+      'Secret key for NEAR_ORACLE_ACCOUNT_ID, as `ed25519:<base58>`. Server-only. ' +
+      'Must be a *function-call* access key limited to `award_feed_xp` on the ' +
+      'staking contract — the chain is what enforces that, so a leak of this ' +
+      'key can award capped XP and nothing else. Never a full-access key.'
   }
 });

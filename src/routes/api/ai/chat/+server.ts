@@ -3,8 +3,9 @@ import { NEAR_AI_API_KEY, NEAR_AI_BASE_URL, NEAR_AI_MODEL } from '$app/env/priva
 import type { RequestHandler } from './$types';
 import { buildTask, extractJson, type PetContext } from '#lib/ai/prompts';
 import { feedXp, LENS_BONUS, SINKS, type CreditAction } from '#lib/economy/params';
+import { awardFeedXp } from '#lib/server/feed-xp';
 import { ReplayGuardUnavailableError } from '#lib/server/receipt-store';
-import { ReceiptError, verifySpendReceipt } from '#lib/server/verify-tx';
+import { ReceiptError, type SpendReceipt, verifySpendReceipt } from '#lib/server/verify-tx';
 
 const AI_ACTIONS: CreditAction[] = ['ai_feed', 'train', 'craft_item', 'chat'];
 
@@ -36,14 +37,13 @@ export const POST: RequestHandler = async ({ request }) => {
   }
 
   // No inference happens until we have seen the on-chain payment.
-  let lensApplied = false;
+  let receipt: SpendReceipt;
   try {
-    const receipt = await verifySpendReceipt({
+    receipt = await verifySpendReceipt({
       txHash: body.txHash,
       accountId: body.accountId,
       action: body.action
     });
-    lensApplied = receipt.lensApplied;
   } catch (err) {
     if (err instanceof ReceiptError) error(402, err.message);
     // Refusing is the point: a guard that cannot deduplicate receipts would let
@@ -51,6 +51,8 @@ export const POST: RequestHandler = async ({ request }) => {
     if (err instanceof ReplayGuardUnavailableError) error(503, err.message);
     throw err;
   }
+
+  const lensApplied = receipt.lensApplied;
 
   const task = buildTask(body.action, body.pet, body.message);
 
@@ -101,6 +103,19 @@ export const POST: RequestHandler = async ({ request }) => {
     // 1.0x for a miss, up to 1.8x for a perfect match, plus the lens bonus the
     // contract says was consumed.
     const multiplier = 1 + match * 0.8 + (lensApplied ? LENS_BONUS : 0);
+    const xpGained = feedXp(match, lensApplied);
+
+    // Now write it to the chain. The pet id comes from the receipt rather than
+    // from `body.pet`, so a client cannot pay for one pet and level another.
+    //
+    // A failure here is reported, not thrown: the credits are gone and the
+    // inference is already paid for, so losing the reaction as well would be
+    // the worse outcome. `xpAwarded` is how the browser knows which happened.
+    const award =
+      receipt.petId === null
+        ? { awarded: false as const, xp: xpGained, reason: 'The payment named no pet' }
+        : await awardFeedXp(receipt.petId, xpGained);
+
     return json({
       ...result,
       meal: String(parsed.meal ?? 'mystery stew'),
@@ -108,7 +123,10 @@ export const POST: RequestHandler = async ({ request }) => {
       tasteMatch: match,
       lensApplied,
       xpMultiplier: Number(multiplier.toFixed(2)),
-      xpGained: feedXp(match, lensApplied)
+      xpGained: award.xp,
+      xpAwarded: award.awarded,
+      xpTxHash: award.awarded ? award.txHash : null,
+      xpError: award.awarded ? null : award.reason
     });
   }
 

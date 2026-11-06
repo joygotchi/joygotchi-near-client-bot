@@ -348,6 +348,17 @@ export function feedXp(tasteMatch: number, lensActive = false): number {
   return Math.round(BASE_FEED_XP * multiplier);
 }
 
+/**
+ * The most XP one feed can be worth: a perfect taste match with a Focus Lens.
+ *
+ * `pet-stake::award_feed_xp` clamps to the same number, and that is the one
+ * that matters — the XP award is signed by a server key, and a server can be
+ * compromised. The game contract's own clamp is 500, which is five levels in
+ * five calls. Keep this in step with `MAX_FEED_XP` in
+ * contracts/pet-stake/src/types.rs.
+ */
+export const MAX_FEED_XP = feedXp(1, true);
+
 export function formatCredits(credits: number, maxFraction = 3): string {
   if (!Number.isFinite(credits)) return '0';
   return credits.toLocaleString('en-US', {

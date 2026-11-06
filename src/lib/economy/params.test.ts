@@ -15,6 +15,7 @@ import {
   xpForLevel,
   EPOCH_SECONDS,
   LENS_BONUS,
+  MAX_FEED_XP,
   MINING_COOLDOWN_SECONDS
 } from '#lib/economy/params';
 
@@ -120,6 +121,25 @@ describe('feedXp', () => {
   it('clamps a taste match the model reports out of range', () => {
     expect(feedXp(-5)).toBe(feedXp(0));
     expect(feedXp(99)).toBe(feedXp(1));
+  });
+
+  // The XP award is signed by a server key, so the cap is what stands between
+  // a compromised backend and a maxed pet. `MAX_FEED_XP` in
+  // contracts/pet-stake/src/types.rs has to be this same number, and the
+  // contract clamps to it — this side only keeps the two honest.
+  it('never exceeds the cap the staking contract enforces', () => {
+    expect(MAX_FEED_XP).toBe(72);
+    expect(feedXp(1, true)).toBe(MAX_FEED_XP);
+
+    for (const match of [0, 0.01, 0.25, 0.5, 0.75, 0.99, 1, 5, -1]) {
+      expect(feedXp(match, true)).toBeLessThanOrEqual(MAX_FEED_XP);
+      expect(feedXp(match, false)).toBeLessThanOrEqual(MAX_FEED_XP);
+    }
+  });
+
+  it('leaves the cap well under the game contract\u2019s own clamp of 500', () => {
+    // 500 is seven feeds' worth, which is five levels in five calls.
+    expect(MAX_FEED_XP * 6).toBeLessThan(500);
   });
 });
 

@@ -309,7 +309,13 @@ one.
 | `change_name_pet` | pet owner |
 | `nft_transfer` / `nft_approve` | pet owner or approved, **and not staked** |
 | `set_staked` (if adopted) | **`pet-stake` only** |
+| `award_xp` | **`pet-stake` only**, or the owner |
 | `migrate` | owner, once |
+
+`award_xp` is where feed XP arrives, via `pet-stake::award_feed_xp`, which is
+in turn gated on that contract's `oracle`. Keeping the game contract's rule at
+"the staking contract only" is what stops the AI backend needing a key on the
+game owner's account, which can mint, pause and transfer pets.
 
 Deploy-time configuration the contract needs: `owner_id`, `stake_contract`,
 `mint_router`.
@@ -486,6 +492,10 @@ the mainnet deploy, or accept that the first post-launch field addition is a
 migration exercise: an `#[init(ignore_state)]` entry point that keeps the
 previous struct definition around to deserialise with.
 
+That exercise has since been done, for `oracle` on `PetStake` — see the end of
+§10. It works, and it is cheap once the new field is appended rather than
+inserted, so there is now a worked example to copy rather than a plan.
+
 ## 10 · The full testnet sweep
 
 A second pass over the deployed contracts, this time every path and every
@@ -594,23 +604,112 @@ account_rebuilt  jg-p2-72362.testnet  weight 0
 pool             total_weight 100     ← one staked pet, 100 weight. Correct.
 ```
 
-### Feed XP is never written on chain
+### Feed XP reaches the chain — fixed
 
-`spend_credits("ai_feed")` debits credits and emits `credit_spent`.
-`/api/ai/chat` verifies that receipt, runs the inference, computes
-`xpGained` — and returns it to the browser. Nothing calls `award_xp`.
+**What the sweep found.** `spend_credits("ai_feed")` debited credits and
+emitted `credit_spent`. `/api/ai/chat` verified that receipt, ran the
+inference, computed `xpGained` — and returned it to the browser. Nothing
+called `award_xp`, which accepts only the staking contract or the game owner,
+and no code in this repository called it from either. So a pet's XP stayed 0
+however much it was fed: no levels, no weight growth, no evolve, no star gates,
+and no reason to feed at all. Confirmed by feeding pet 3 twice and reading
+`xp: 0`, then levelling it by hand as the owner, which worked — the on-chain
+half was sound, there was simply no caller.
 
-`award_xp` accepts only the staking contract or the game owner, and no code in
-this repository calls it from either. So on the live chain a pet's XP stays 0
-however much it is fed: no levels, no weight growth, no evolve, no star gates.
-Confirmed by feeding pet 3 twice and reading `xp: 0`, then levelling it by
-hand as the owner, which worked.
+**What happens now.** The award cannot live inside `spend_credits`, because the
+taste multiplier is only known after NEAR AI has judged the meal. So it is a
+second call, signed by the backend:
 
-This is a missing piece rather than a bug: the taste multiplier is only known
-after inference, so the award cannot happen inside `spend_credits`, and the
-server has no key to call anything. It needs the delegated signer that issue #8
-is already about — `pet-stake` gaining an oracle-gated `award_feed_xp` that
-forwards to the game contract, with the server holding that key.
+```
+browser    spend_credits("ai_feed", pet_id, amount)        → credit_spent event
+backend    verify the receipt, run the inference, feedXp(match, lens)
+backend    pet-stake::award_feed_xp(pet_id, xp)            ← function-call key
+pet-stake  game::award_xp(pet_id, min(xp, MAX_FEED_XP))
+game       grant_xp → level up → sync_weight → pet-stake
+```
+
+Three pieces:
+
+- **`pet-stake::award_feed_xp(pet_id, xp)`**, gated on a new `oracle` account
+  (plus the owner, like every other admin method) and settable with
+  `set_oracle`. It forwards through the existing `ext_game` interface, so the
+  game contract's "only the staking contract" rule stands unchanged. The
+  alternative was handing the backend a key on the *game owner's* account,
+  which can mint, pause and transfer pets.
+- **A cap of `MAX_FEED_XP` = 72**, which is `feedXp(1, true)` — one perfect
+  match with a Focus Lens — and nothing more, so the number needs no separate
+  justification. `game::award_xp`'s own clamp is 500, seven feeds' worth: wide
+  enough for a compromised backend to take a pet five levels in five calls.
+  The contract clamps rather than rejecting, and the event records both the
+  awarded and the requested value, so an oracle gone wrong is visible in the
+  log rather than silently failing.
+- **A server signer**, `src/lib/server/near-signer.ts`: hand-written Borsh and
+  base58, signing with `node:crypto`, ~300 lines and no new dependency. It
+  signs any function call from any key, so auto-feed (issue #8) can use it as
+  it stands.
+
+The key is a **function-call** access key on `oracle.jg-stake-5656.testnet`,
+limited to `award_feed_xp` on the staking contract. Everything else it was
+pointed at was refused by the chain before reaching a contract:
+
+| Attempt with the oracle key | Result |
+|---|---|
+| `jg-stake::award_feed_xp` | **succeeded** |
+| `jg-stake::claim_faucet` | `InvalidAccessKeyError::MethodNameMismatch` |
+| `jg-stake::set_oracle` | `InvalidAccessKeyError::MethodNameMismatch` |
+| `jg-game::award_xp` (direct) | `InvalidAccessKeyError::ReceiverMismatch` |
+
+`/api/ai/chat` never fails the request over a failed award. By the time it runs
+the credits are spent and the inference is paid for, so it degrades the way the
+JSON-parse fallback already does and reports `xpAwarded`, `xpTxHash` and
+`xpError` in the response. The toast reads the first of those: before this
+existed, every feed said "+63 XP" while the pet stayed at `xp: 0`, which is the
+worse half of the bug — a player watching for a level that was never coming.
+
+**Proved live**, feeding through the real route against
+`jg-stake-5656.testnet`:
+
+| | Before | After |
+|---|---|---|
+| Pet 4 `xp` | 0 | **60** (taste match 0.9, 1.72x) |
+| Pet 1 `level` / `xp`, two feeds | 0 / 0 | **1 / 20** |
+| Pet 1 `atk` / `def` | 100 / 100 | **104 / 103** |
+| Pool `total_weight` (pet 1 is staked) | 100 | **105** |
+| Pet 4 after a 500-XP request from the key | 62 | **level 2, xp 16** — +72, the cap |
+
+The level-up, the stat growth and the staking-weight re-sync all followed from
+one feed, which is the whole chain in section 5 running for the first time.
+Only the NEAR AI call itself was stubbed: this checkout has no
+`NEAR_AI_API_KEY`, so a local endpoint returned an OpenAI-shaped completion
+with `taste_match: 0.9`. Everything else — receipt verification, the replay
+guard, `feedXp`, the signer, both contracts — was the real thing.
+
+### Adding `oracle` was migrated, not redeployed
+
+`oracle` is a new field on the `PetStake` struct, which is the Borsh layout
+change §9 says has already cost this repository two deployments. It was
+appended last, so the old bytes are exactly the new layout minus a trailing
+`AccountId`, and `migrate` — an `#[init(ignore_state)]` entry point holding the
+previous struct definition — reads them and fills in the field.
+
+Fresh accounts were the other option and would have been easier. They were not
+taken because on testnet the cost is a faucet call, while the same change on
+mainnet has no fresh-accounts option at all: a redeploy with empty state costs
+every player their staked pet and their credit balance. Writing the migration
+on testnet is the only way to find out whether the migration works.
+
+It does. Deploy and `migrate` go in one transaction, so there is no window in
+which the new code is live over state it cannot read, and every number came
+back unchanged:
+
+```
+before   total_weight 100  staked_pets 1  total_distributed 244399  total_spent 34000  sale_reserve 48986250
+after    total_weight 100  staked_pets 1  total_distributed 244399  total_spent 34000  sale_reserve 48986250
+         oracle oracle.jg-stake-5656.testnet   max_feed_xp 72
+```
+
+`contracts/migrate-testnet.sh` is that path; `deploy-testnet.sh` still runs
+`new` and is for fresh accounts only, which its header now says.
 
 ### Smaller things
 

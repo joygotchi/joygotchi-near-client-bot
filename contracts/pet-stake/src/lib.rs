@@ -31,6 +31,9 @@ pub use types::*;
 const GAS_FOR_METADATA: Gas = Gas::from_tgas(10);
 const GAS_FOR_LOCK: Gas = Gas::from_tgas(10);
 const GAS_FOR_RESOLVE: Gas = Gas::from_tgas(15);
+/// `award_xp` can level the pet, which makes the game contract call back into
+/// this one to re-sync the pet's weight, so this leaves room for two hops.
+const GAS_FOR_AWARD_XP: Gas = Gas::from_tgas(30);
 
 #[derive(BorshSerialize, BorshStorageKey)]
 #[borsh(crate = "near_sdk::borsh")]
@@ -54,6 +57,11 @@ trait Game {
     /// cannot be transferred there. A transfer has to be atomic, and a
     /// cross-contract view cannot be, so the flag has to live on both sides.
     fn set_locked(&mut self, pet_id: u64, locked: bool);
+
+    /// Add XP to a pet, levelling it if that crosses the threshold. The game
+    /// contract accepts this from the staking contract or its own owner only,
+    /// which is why awarding XP has to come through here.
+    fn award_xp(&mut self, pet_id: u64, xp: u32);
 }
 
 #[ext_contract(ext_self)]
@@ -111,18 +119,31 @@ pub struct PetStake {
     market_rake_bps: u16,
 
     paused: bool,
+
+    /// The one account allowed to report feed XP — the AI backend's key.
+    ///
+    /// Last in the struct on purpose: the previous layout's bytes are then a
+    /// prefix of this one, which is what makes `migrate` below a pure append
+    /// rather than a re-read of every field. See docs/GAME_CONTRACT_V2.md §7.
+    oracle: AccountId,
 }
 
 #[near]
 impl PetStake {
+    /// `oracle` is the AI backend's account, the only one allowed to report
+    /// feed XP. Left out it falls back to the owner and `set_oracle` names it
+    /// later, because the backend's key usually does not exist yet when the
+    /// three contracts go up.
     #[init]
     pub fn new(
         owner_id: AccountId,
         game_contract: AccountId,
         granter: AccountId,
         epoch_budget: U128,
+        oracle: Option<AccountId>,
     ) -> Self {
         let mut contract = Self {
+            oracle: oracle.unwrap_or_else(|| owner_id.clone()),
             owner_id,
             game_contract,
             granter,
@@ -916,6 +937,49 @@ impl PetStake {
         );
     }
 
+    // ── Feed XP ──────────────────────────────────────────────────────────────
+
+    /// Report the XP one AI feed earned, and forward it to the game contract.
+    ///
+    /// The XP cannot be awarded inside `spend_credits`: the taste multiplier is
+    /// only known once NEAR AI has judged the meal, which happens off-chain
+    /// after the credits are already debited. So the backend verifies the
+    /// `spend_credits` receipt, runs the inference, and reports the result here.
+    ///
+    /// `game::award_xp` accepts only this contract or the game owner, which is
+    /// why the hop exists at all — the alternative is handing the backend a key
+    /// on the game owner's account, which can mint, pause and transfer pets.
+    ///
+    /// `xp` is clamped to `MAX_FEED_XP` rather than trusted: the caller is a
+    /// server, and a server can be compromised. One feed is worth at most one
+    /// perfect feed.
+    pub fn award_feed_xp(&mut self, pet_id: u64, xp: u32) -> Promise {
+        self.assert_running();
+        let caller = env::predecessor_account_id();
+        require!(
+            caller == self.oracle || caller == self.owner_id,
+            "Only the feed oracle can award XP"
+        );
+        require!(xp > 0, "Nothing to award");
+
+        let awarded = xp.min(MAX_FEED_XP);
+        self.log_event(
+            "feed_xp_awarded",
+            json!({ "pet_id": pet_id, "xp": awarded, "requested": xp }),
+        );
+
+        ext_game::ext(self.game_contract.clone())
+            .with_static_gas(GAS_FOR_AWARD_XP)
+            .award_xp(pet_id, awarded)
+    }
+
+    /// Name the account whose key the AI backend signs `award_feed_xp` with.
+    pub fn set_oracle(&mut self, oracle: AccountId) {
+        self.assert_owner();
+        self.oracle = oracle;
+        self.log_event("oracle_set", json!({ "oracle": self.oracle }));
+    }
+
     // ── Owner ────────────────────────────────────────────────────────────────
 
     /// Publish the credit allowance NEAR AI grants for the treasury's staked
@@ -1182,6 +1246,8 @@ impl PetStake {
             "owner_id": self.owner_id,
             "game_contract": self.game_contract,
             "granter": self.granter,
+            "oracle": self.oracle,
+            "max_feed_xp": MAX_FEED_XP,
             "faucet_amount": U128(self.faucet_amount),
             "mining_reward": U128(self.mining_reward),
             "mining_cooldown_seconds": MINING_COOLDOWN_SECONDS,
@@ -1297,6 +1363,89 @@ impl PetStake {
     }
 }
 
+// ── Migration ────────────────────────────────────────────────────────────────
+
+/// The contract state as it was before `oracle` was added.
+///
+/// Adding a field to the contract struct is a Borsh layout change, and this
+/// repository has already lost two deployments to one (see
+/// docs/GAME_CONTRACT_V2.md §9). `oracle` is appended last, so these bytes are
+/// exactly the new layout minus its final `AccountId` — which is the whole
+/// reason a migration is possible here instead of fresh accounts: a redeploy
+/// with new state costs every player their staked pet and their credit
+/// balance, and on mainnet that is not a thing that can be done at all.
+#[derive(near_sdk::borsh::BorshDeserialize)]
+#[borsh(crate = "near_sdk::borsh")]
+struct PetStakeV1 {
+    owner_id: AccountId,
+    game_contract: AccountId,
+    granter: AccountId,
+    epoch_budget: u128,
+    total_weight: u128,
+    acc_credit_per_weight: u128,
+    updated_at: u64,
+    accounts: UnorderedMap<AccountId, Account>,
+    pets: UnorderedMap<u64, StakedPet>,
+    prices: LookupMap<String, u128>,
+    pet_states: UnorderedMap<u64, PetState>,
+    item_prices: LookupMap<u16, u128>,
+    battle_wager: u128,
+    battle_rake_bps: u16,
+    total_distributed: u128,
+    total_spent: u128,
+    sale_reserve: u128,
+    faucet_amount: u128,
+    mining_reward: u128,
+    listings: UnorderedMap<u64, Listing>,
+    next_listing_id: u64,
+    market_rake_bps: u16,
+    paused: bool,
+}
+
+#[near]
+impl PetStake {
+    /// Deploy over a contract that predates `oracle`, keeping every stake,
+    /// balance, item and listing.
+    ///
+    /// Owner-gated by reading the *old* state's `owner_id` — `assert_owner`
+    /// cannot be used, because at this point `self` does not exist yet.
+    #[init(ignore_state)]
+    pub fn migrate(oracle: AccountId) -> Self {
+        let old: PetStakeV1 = env::state_read().expect("No state to migrate");
+        require!(
+            env::predecessor_account_id() == old.owner_id,
+            "Only the owner can migrate"
+        );
+
+        Self {
+            owner_id: old.owner_id,
+            game_contract: old.game_contract,
+            granter: old.granter,
+            epoch_budget: old.epoch_budget,
+            total_weight: old.total_weight,
+            acc_credit_per_weight: old.acc_credit_per_weight,
+            updated_at: old.updated_at,
+            accounts: old.accounts,
+            pets: old.pets,
+            prices: old.prices,
+            pet_states: old.pet_states,
+            item_prices: old.item_prices,
+            battle_wager: old.battle_wager,
+            battle_rake_bps: old.battle_rake_bps,
+            total_distributed: old.total_distributed,
+            total_spent: old.total_spent,
+            sale_reserve: old.sale_reserve,
+            faucet_amount: old.faucet_amount,
+            mining_reward: old.mining_reward,
+            listings: old.listings,
+            next_listing_id: old.next_listing_id,
+            market_rake_bps: old.market_rake_bps,
+            paused: old.paused,
+            oracle,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1317,6 +1466,9 @@ mod tests {
     }
     fn bob() -> AccountId {
         "bob.near".parse().unwrap()
+    }
+    fn oracle() -> AccountId {
+        "oracle.near".parse().unwrap()
     }
 
     fn ctx(predecessor: AccountId, seconds: u64) -> VMContextBuilder {
@@ -1340,7 +1492,7 @@ mod tests {
     /// 500 credits per 30-day epoch.
     fn deploy() -> PetStake {
         testing_env!(ctx(owner(), 0).build());
-        PetStake::new(owner(), game(), router(), U128(500 * ONE_CREDIT))
+        PetStake::new(owner(), game(), router(), U128(500 * ONE_CREDIT), Some(oracle()))
     }
 
     #[test]
@@ -1523,6 +1675,118 @@ mod tests {
         let mut contract = deploy();
         testing_env!(ctx(alice(), 10).build());
         contract.admin_rebuild_account(alice());
+    }
+
+    // ── Feed XP ──────────────────────────────────────────────────────────────
+    //
+    // `award_feed_xp` returns a Promise that a unit test cannot resolve, hence
+    // the `let _ =`. What is under test is everything that runs before it: the
+    // caller check, the clamp and the event. That the forwarded call reaches
+    // `game::award_xp` is proved on testnet — see docs/GAME_CONTRACT_V2.md §10.
+
+    #[test]
+    #[should_panic(expected = "Only the feed oracle can award XP")]
+    fn players_cannot_award_their_own_pet_xp() {
+        let mut contract = deploy();
+        testing_env!(ctx(owner(), 0).build());
+        contract.admin_set_pet(1, alice(), attrs(0, 0, 1, Rarity::Common));
+
+        // Owning the pet is not the point: XP comes from an inference this
+        // contract cannot see, so only the backend that ran it may report it.
+        testing_env!(ctx(alice(), 10).build());
+        let _ = contract.award_feed_xp(1, 60);
+    }
+
+    #[test]
+    fn the_oracle_can_award_xp() {
+        let mut contract = deploy();
+        testing_env!(ctx(owner(), 0).build());
+        contract.admin_set_pet(1, alice(), attrs(0, 0, 1, Rarity::Common));
+
+        testing_env!(ctx(oracle(), 10).build());
+        let _ = contract.award_feed_xp(1, 63);
+
+        let logs = near_sdk::test_utils::get_logs();
+        let awarded = logs
+            .iter()
+            .find(|l| l.contains("\"feed_xp_awarded\""))
+            .unwrap_or_else(|| panic!("logs were {logs:?}"));
+        assert!(awarded.contains("\"xp\":63"), "log was {awarded}");
+    }
+
+    #[test]
+    fn the_owner_can_award_xp_too() {
+        let mut contract = deploy();
+        testing_env!(ctx(owner(), 0).build());
+        contract.admin_set_pet(1, alice(), attrs(0, 0, 1, Rarity::Common));
+        // Same escape hatch every other admin method has, so a broken oracle
+        // key does not freeze levelling.
+        let _ = contract.award_feed_xp(1, 10);
+    }
+
+    #[test]
+    fn one_feed_cannot_be_worth_more_than_a_perfect_feed() {
+        let mut contract = deploy();
+        testing_env!(ctx(oracle(), 10).build());
+
+        // The game contract's own clamp is 500, which a compromised backend
+        // could use to take a pet five levels in five calls.
+        let _ = contract.award_feed_xp(1, 500);
+
+        let logs = near_sdk::test_utils::get_logs();
+        let awarded = logs
+            .iter()
+            .find(|l| l.contains("\"feed_xp_awarded\""))
+            .unwrap_or_else(|| panic!("logs were {logs:?}"));
+        assert!(
+            awarded.contains(&format!("\"xp\":{MAX_FEED_XP}")),
+            "log was {awarded}"
+        );
+        // What was asked for is kept, so an oracle gone wrong is visible.
+        assert!(awarded.contains("\"requested\":500"), "log was {awarded}");
+    }
+
+    #[test]
+    #[should_panic(expected = "Nothing to award")]
+    fn a_zero_xp_award_is_refused() {
+        let mut contract = deploy();
+        testing_env!(ctx(oracle(), 10).build());
+        let _ = contract.award_feed_xp(1, 0);
+    }
+
+    #[test]
+    fn the_owner_can_move_the_oracle() {
+        let mut contract = deploy();
+        testing_env!(ctx(owner(), 0).build());
+        contract.set_oracle(bob());
+
+        testing_env!(ctx(bob(), 10).build());
+        let _ = contract.award_feed_xp(1, 20);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only the owner can call this")]
+    fn a_player_cannot_make_themselves_the_oracle() {
+        let mut contract = deploy();
+        testing_env!(ctx(alice(), 10).build());
+        contract.set_oracle(alice());
+    }
+
+    #[test]
+    #[should_panic(expected = "Only the feed oracle can award XP")]
+    fn the_old_oracle_loses_the_right_when_it_moves() {
+        let mut contract = deploy();
+        testing_env!(ctx(owner(), 0).build());
+        contract.set_oracle(bob());
+
+        testing_env!(ctx(oracle(), 10).build());
+        let _ = contract.award_feed_xp(1, 20);
+    }
+
+    #[test]
+    fn the_cap_is_exactly_one_perfect_feed() {
+        // Mirrors feedXp(1, true) in src/lib/economy/params.ts: 35 * 2.05.
+        assert_eq!(MAX_FEED_XP, 72);
     }
 
     #[test]

@@ -11,6 +11,20 @@ export type AiFeedResult = {
   lensApplied: boolean;
   xpMultiplier: number;
   xpGained: number;
+  /**
+   * Whether the XP was actually written to the pet on chain.
+   *
+   * False is a real outcome, not an error: the credits are spent and the
+   * inference has run by the time the award is attempted, so the server
+   * reports a failed award instead of failing the whole request. Before the
+   * oracle key existed this was always false and nothing said so — a feed
+   * showed "+63 XP" and the pet stayed at `xp: 0`.
+   */
+  xpAwarded: boolean;
+  /** The `award_feed_xp` transaction, when it landed. */
+  xpTxHash: string | null;
+  /** Why it did not land, when it did not. */
+  xpError: string | null;
   tokens: number | null;
 };
 
@@ -40,6 +54,22 @@ export type AiChatResult = {
 };
 
 export type AiResult = AiFeedResult | AiTrainResult | AiCraftResult | AiChatResult;
+
+/**
+ * One line about a finished feed, for the toast.
+ *
+ * Claiming XP the chain never got is the specific thing this exists to stop:
+ * the player then sees a level that never arrives and no reason why.
+ */
+export function feedSummary(result: AiFeedResult): string {
+  if (!result.xpAwarded) {
+    const reason = (result.xpError ?? 'the award did not go through').trim();
+    const short = reason.length > 80 ? `${reason.slice(0, 79)}…` : reason;
+    return `No XP written on chain — ${short}`;
+  }
+  const lens = result.lensApplied ? ', lens' : '';
+  return `+${result.xpGained} XP (${result.xpMultiplier}x${lens})`;
+}
 
 /**
  * Run an AI action. `txHash` must be the `spend_credits` transaction that paid
