@@ -666,8 +666,10 @@ Three pieces:
   signs any function call from any key, so auto-feed (issue #8) can use it as
   it stands.
 
-The key is a **function-call** access key on `oracle.jg-stake-5656.testnet`,
-limited to `award_feed_xp` on the staking contract. Everything else it was
+The key is a **function-call** access key, at the time of this run on
+`oracle.jg-stake-5656.testnet`, limited to `award_feed_xp` on the staking
+contract. The oracle has since been rotated to `feeder.jg-stake-5656.testnet`
+with a key covering both methods — see the end of this section. Everything else it was
 pointed at was refused by the chain before reaching a contract:
 
 | Attempt with the oracle key | Result |
@@ -829,13 +831,61 @@ planned   nothing at the real 6h threshold
           at whenUnder=60,000: pets 1 then 4 — nearest first, 2 feeds, 3 out of range
 ```
 
-**Still open:** the deployed function-call key permits `award_feed_xp` only, so
-the chain refuses `auto_feed` from the server until a key permitting both
-exists. The live proof above was signed as the staking contract's owner, which
-`auto_feed` accepts on the same branch of the same check as the oracle. Adding
-the key needs the oracle account's full-access secret; the invocation is in
-"The feed-XP oracle" in contracts/README.md, with
-`--function-names 'award_feed_xp,auto_feed'`.
+**The oracle was rotated to get the key, not widened.** The proof above had to
+be signed as the staking contract's *owner*, because the deployed function-call
+key permitted `award_feed_xp` only. Widening it turned out to need the oracle
+account's own full-access secret: `AddKey` is only valid when
+`predecessor == receiver`, so `jg-stake-5656.testnet` cannot add a key to its
+own sub-account `oracle.jg-stake-5656.testnet`. That secret existed only as
+plaintext outside the repo, which is a bad thing to need.
+
+So the oracle moved instead. `feeder.jg-stake-5656.testnet` was created with
+`autogenerate-new-keypair save-to-keychain`, so its full-access key exists
+*only* in the keychain and no plaintext copy was ever made; the restricted key
+was then added signing with it, and `set_oracle` pointed the contract across:
+
+```
+feeder.jg-stake-5656.testnet
+  76wbHn4q…  full access (keychain only)
+  E6KjC8SL…  only ["award_feed_xp","auto_feed"] on jg-stake-5656.testnet, 0.250 NEAR
+get_config → oracle: feeder.jg-stake-5656.testnet
+```
+
+`DeleteAccount` has the same `predecessor == receiver` rule, so the old oracle
+account cannot be cleaned up without its secret either. It is no longer the
+oracle — the contract refuses it — and holds no credits and no staked pets, so
+it is harmless dead weight with 0.497 NEAR on it.
+
+**Then the server path, which nothing had proved until this point.** The app's
+own cron route signed `auto_feed` with the new key. No pet was inside the
+six-hour threshold, so rather than widening the threshold the run waited for
+pet 1 to cross it on its own (22,215s → 21,604s), which keeps the real
+selection path in the test:
+
+```
+GET /api/cron/auto-feed
+{ accounts: 1, petsRead: 4, planned: 1, fed: 1, failed: 0, ms: 3824,
+  results: [{ petId: 1, fed: true, txHash: zV3nQT3CUVhSK5BtsjLfbjTFHxBiV2tgLwAmMmzk67L }] }
+
+pet 1       starves_at +43,200s exactly, 64,724s left, HAPPY
+            xp still 20          ← auto-feed grants no XP, as designed
+balance     966,066 → 951,066
+spent_today 45,000 → 60,000 of 75,000
+```
+
+A second run immediately after planned nothing and fed nothing — pet 1 is 18
+hours out and no longer inside the threshold, so the cron does not double-feed.
+A wide-threshold dry run then showed `available` down to 15,000, one feed's
+worth, and planned exactly one pet: the budget arithmetic follows the spend.
+
+The whole chain is therefore proved live, end to end: cron → shared-secret gate
+→ contract reads → pure plan → server key signs → `pet-stake` debits against
+the daily window → `game` moves `starves_at`.
+
+**Still open:** `CRON_SECRET` has to be set as a deployment environment
+variable or the route refuses every request, and Vercel Hobby plans allow daily
+crons only — a pet can starve between daily runs, so on Hobby either the plan
+or the six-hour threshold has to change.
 ### A sink that charged for nothing — removed
 
 `revive` was seeded into `pet-stake`'s `prices` at 1 credit and listed in the
