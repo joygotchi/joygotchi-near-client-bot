@@ -25,10 +25,11 @@ import type { RequestHandler } from './$types';
 import { GAME_CONTRACT, STAKE_CONTRACT } from '#lib/config';
 import {
   planAutoFeeds,
+  secondsUntilStarving,
   type AutoFeedAccount,
   type AutoFeedPet
 } from '#lib/economy/auto-feed';
-import { SINKS } from '#lib/economy/params';
+import { AUTO_FEED_WHEN_UNDER_SECONDS, SINKS } from '#lib/economy/params';
 import { viewFunction } from '#lib/near/rpc';
 import { autoFeedConfigured, autoFeedPet, type AutoFeedOutcome } from '#lib/server/auto-feed';
 
@@ -72,7 +73,7 @@ async function readOptedInAccounts(fetchImpl: typeof fetch): Promise<AutoFeedAcc
   return all;
 }
 
-export const GET: RequestHandler = async ({ request, fetch }) => {
+export const GET: RequestHandler = async ({ request, url, fetch }) => {
   // No secret configured means no cron, not an open cron.
   if (!CRON_SECRET) {
     return json({ error: 'The auto-feed cron is not configured (set CRON_SECRET)' }, { status: 503 });
@@ -80,7 +81,23 @@ export const GET: RequestHandler = async ({ request, fetch }) => {
   if (request.headers.get('authorization') !== `Bearer ${CRON_SECRET}`) {
     return json({ error: 'Unauthorized' }, { status: 401 });
   }
-  if (!autoFeedConfigured()) {
+
+  /**
+   * `?dryRun=1` reads and plans but signs nothing.
+   *
+   * A cron is the one kind of endpoint nobody watches, and the only evidence a
+   * real run leaves is credits already spent. This is how an operator asks
+   * "what would this do right now, and when will it start doing it" without
+   * spending a player's budget to find out. Still behind the secret: it reads
+   * who has opted in.
+   */
+  const dryRun = url.searchParams.get('dryRun') === '1';
+  /** Dry-run only, for seeing how close the next feed is. */
+  const whenUnderSeconds = dryRun
+    ? Number(url.searchParams.get('whenUnder') ?? '') || undefined
+    : undefined;
+
+  if (!dryRun && !autoFeedConfigured()) {
     return json(
       { error: 'No oracle key on this deployment (set NEAR_ORACLE_ACCOUNT_ID and NEAR_ORACLE_PRIVATE_KEY)' },
       { status: 503 }
@@ -135,7 +152,26 @@ export const GET: RequestHandler = async ({ request, fetch }) => {
     }
   }
 
-  const plan = planAutoFeeds({ accounts, pets, nowMs: Date.now(), price });
+  const nowMs = Date.now();
+  const plan = planAutoFeeds({ accounts, pets, nowMs, price, whenUnderSeconds });
+
+  if (dryRun) {
+    return json({
+      dryRun: true,
+      accounts: accounts.map((a) => ({ accountId: a.accountId, available: String(a.available) })),
+      pets: pets.map((pet) => ({
+        petId: pet.petId,
+        ownerId: pet.ownerId,
+        secondsLeft: Math.round(secondsUntilStarving(pet.starvesAt, nowMs))
+      })),
+      whenUnderSeconds: whenUnderSeconds ?? AUTO_FEED_WHEN_UNDER_SECONDS,
+      price: String(price),
+      planned: plan,
+      oracleConfigured: autoFeedConfigured(),
+      ms: Date.now() - started,
+      readErrors
+    });
+  }
 
   // Sequential, not parallel. The signer tracks one nonce per access key, and
   // two calls signed in the same millisecond would collide on it — which costs
