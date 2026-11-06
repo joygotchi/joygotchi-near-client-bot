@@ -203,15 +203,31 @@ of 500 is seven feeds' worth: wide enough for a compromised backend to take a
 pet five levels in five calls.
 
 The key the backend signs with is a **function-call** access key, not a
-full-access one. Making it, for an oracle account that already exists:
+full-access one. On testnet the oracle is `feeder.jg-stake-5656.testnet`:
 
 ```bash
-near account add-key oracle.jg-stake-5656.testnet grant-function-call-access   --allowance '0.25 NEAR'   --contract-account-id jg-stake-5656.testnet   --function-names 'award_feed_xp,auto_feed'   use-manually-provided-public-key ed25519:...   network-config testnet sign-with-keychain send
+near account add-key feeder.jg-stake-5656.testnet grant-function-call-access   --allowance '0.25 NEAR'   --contract-account-id jg-stake-5656.testnet   --function-names 'award_feed_xp,auto_feed'   use-manually-provided-public-key ed25519:...   network-config testnet sign-with-keychain send
 ```
 
 Both methods, one key. `auto_feed` is the other thing the oracle does (see
 below); an access key's `--function-names` is a list, so widening it is a
 comma, not a second key or a full-access one.
+
+**Make the oracle account with its key generated into the keychain**, because
+of a NEAR rule that is easy to learn the hard way: `AddKey` is only valid when
+`predecessor == receiver`, so a parent account cannot add a key to its own
+sub-account. Whoever adds a key to the oracle needs *that account's* own
+full-access key — which means the only way to avoid a plaintext full-access
+secret is never to create one:
+
+```bash
+near account create-account fund-myself feeder.jg-stake-5656.testnet '0.5 NEAR'   autogenerate-new-keypair save-to-keychain   sign-as jg-stake-5656.testnet network-config testnet sign-with-keychain send
+```
+
+The full-access key then exists only in the keychain, the `add-key` above signs
+with it, and `set_oracle` points the contract at the new account. `DeleteAccount`
+has the same rule, so an oracle account whose secret you do not hold cannot be
+cleaned up either — which is the other reason not to create one by hand.
 
 Then `NEAR_ORACLE_ACCOUNT_ID` and `NEAR_ORACLE_PRIVATE_KEY` in `.env`, and
 `set_oracle` so the contract agrees. The restriction is enforced by the chain,
