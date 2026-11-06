@@ -34,6 +34,9 @@ const GAS_FOR_RESOLVE: Gas = Gas::from_tgas(15);
 /// `award_xp` can level the pet, which makes the game contract call back into
 /// this one to re-sync the pet's weight, so this leaves room for two hops.
 const GAS_FOR_AWARD_XP: Gas = Gas::from_tgas(30);
+/// `feed_from_stake` only moves one timestamp and never levels the pet, so
+/// unlike `award_xp` it cannot call back into this contract.
+const GAS_FOR_FEED: Gas = Gas::from_tgas(10);
 
 #[derive(BorshSerialize, BorshStorageKey)]
 #[borsh(crate = "near_sdk::borsh")]
@@ -44,6 +47,7 @@ enum StorageKey {
     PetStates,
     ItemPrices,
     Listings,
+    AutoFeedSpend,
 }
 
 /// The view this contract needs from the game contract. A deployment whose game
@@ -62,12 +66,20 @@ trait Game {
     /// contract accepts this from the staking contract or its own owner only,
     /// which is why awarding XP has to come through here.
     fn award_xp(&mut self, pet_id: u64, xp: u32);
+
+    /// Move a pet's starving deadline on behalf of its owner. Caller-gated to
+    /// this contract there, for the same reason `award_xp` is: the deadline
+    /// lives on the game contract and auto-feed is paid for here. Returns
+    /// false, rather than panicking, when the pet is gone, belongs to someone
+    /// else, or has already starved.
+    fn feed_from_stake(&mut self, pet_id: u64, owner_id: AccountId) -> bool;
 }
 
 #[ext_contract(ext_self)]
 #[allow(dead_code)]
 trait SelfCallbacks {
     fn on_pet_attrs(&mut self, pet_id: u64, account_id: AccountId) -> bool;
+    fn on_auto_fed(&mut self, account_id: AccountId, pet_id: u64, price: U128) -> bool;
 }
 
 #[near(contract_state)]
@@ -126,6 +138,13 @@ pub struct PetStake {
     /// prefix of this one, which is what makes `migrate` below a pure append
     /// rather than a re-read of every field. See docs/GAME_CONTRACT_V2.md §7.
     oracle: AccountId,
+
+    /// Auto-feed spending per account, per daily window.
+    ///
+    /// Appended after `oracle` for exactly the same reason, and held in its own
+    /// collection rather than on `Account` so the migration stays O(1) — see
+    /// `AutoFeedWindow` in types.rs.
+    auto_feed_spend: LookupMap<AccountId, AutoFeedWindow>,
 }
 
 #[near]
@@ -170,6 +189,7 @@ impl PetStake {
             next_listing_id: 1,
             market_rake_bps: 500, // 5%
             paused: false,
+            auto_feed_spend: LookupMap::new(StorageKey::AutoFeedSpend),
         };
 
         // Keep these in step with src/lib/economy/params.ts.
@@ -924,6 +944,14 @@ impl PetStake {
         U128(self.faucet_amount)
     }
 
+    /// Set the daily auto-feed allowance, in micro-credits. 0 turns it off.
+    ///
+    /// This is the player's whole control over auto-feed, and it is the only
+    /// one they need: the contract will not spend past it, so turning it to 0
+    /// stops auto-feeding on the next call with nothing else to revoke. That is
+    /// the main reason auto-feed is an oracle-gated method here rather than a
+    /// per-player function-call key handed to a worker — a key would have to be
+    /// revoked, and the worker would have to notice.
     pub fn set_auto_feed_budget(&mut self, budget: U128) {
         let account_id = env::predecessor_account_id();
         let mut account = self.account_or_default(&account_id);
@@ -934,6 +962,131 @@ impl PetStake {
             "auto_feed_set",
             json!({ "account_id": account_id, "budget": budget }),
         );
+    }
+
+    // ── Auto-feed ────────────────────────────────────────────────────────────
+
+    fn auto_feed_window(&self, account_id: &AccountId) -> AutoFeedWindow {
+        self.auto_feed_spend.get(account_id).unwrap_or_default()
+    }
+
+    /// Feed one of `account_id`'s pets out of their own credit balance, inside
+    /// the daily allowance they set.
+    ///
+    /// Oracle-gated, like `award_feed_xp`, and for a reason worth stating:
+    /// `spend_credits` debits `env::predecessor_account_id()`, so a server key
+    /// calling *that* would spend the server's credits, not the player's. The
+    /// budget is already on chain, so instead the contract debits the named
+    /// account against that account's own allowance — which puts the limit on
+    /// the chain rather than in the worker, and means a compromised oracle can
+    /// spend at most one player's daily budget per day, on that player's own
+    /// pets, on nothing but food.
+    ///
+    /// The credits are debited here and refunded in `on_auto_fed` if the game
+    /// contract declines the feed. That ordering, rather than feeding first and
+    /// charging in the callback, is what makes the budget check atomic: two
+    /// calls landing in the same block would otherwise both see a full
+    /// allowance and both spend it.
+    pub fn auto_feed(&mut self, account_id: AccountId, pet_id: u64) -> Promise {
+        self.assert_running();
+        let caller = env::predecessor_account_id();
+        require!(
+            caller == self.oracle || caller == self.owner_id,
+            "Only the feed oracle can auto-feed"
+        );
+
+        self.update_pool();
+
+        let price = self.prices.get(&"auto_feed".to_string()).expect("Unknown action");
+        let mut account = self.account_or_default(&account_id);
+        self.harvest(&mut account);
+
+        require!(
+            account.auto_feed_budget > 0,
+            "Auto-feed is off for this account"
+        );
+
+        let now = env::block_timestamp();
+        let window = AutoFeedWindow::window_of(now);
+        let spent = self.auto_feed_window(&account_id).spent_in(now);
+        require!(
+            spent + price <= account.auto_feed_budget,
+            "Today's auto-feed budget is used up"
+        );
+        require!(
+            account.credit_balance >= price,
+            "Not enough credits to auto-feed"
+        );
+
+        account.credit_balance -= price;
+        self.accounts.insert(&account_id, &account);
+        self.auto_feed_spend.insert(
+            &account_id,
+            &AutoFeedWindow {
+                window,
+                spent: spent + price,
+            },
+        );
+        self.total_spent += price;
+
+        // No drop roll. Drops are the reward for actually playing with a pet,
+        // and a cron that rolls them while the player is away turns a presence
+        // bonus into passive income — which is the one thing the credit stream
+        // is already for.
+        self.log_event(
+            "auto_fed",
+            json!({
+                "account_id": account_id,
+                "pet_id": pet_id,
+                "amount": U128(price),
+                "spent_today": U128(spent + price),
+                "budget": U128(account.auto_feed_budget),
+            }),
+        );
+
+        ext_game::ext(self.game_contract.clone())
+            .with_static_gas(GAS_FOR_FEED)
+            .feed_from_stake(pet_id, account_id.clone())
+            .then(
+                ext_self::ext(env::current_account_id())
+                    .with_static_gas(GAS_FOR_RESOLVE)
+                    .on_auto_fed(account_id, pet_id, U128(price)),
+            )
+    }
+
+    /// Give the credits back when the pet was not actually fed.
+    ///
+    /// Credits are a ledger entry and never leave this contract, so the refund
+    /// is exact: balance, window spend and `total_spent` all go back. Without
+    /// it a pet that had already starved, or been sold, would cost its former
+    /// owner their daily budget for nothing.
+    #[private]
+    pub fn on_auto_fed(
+        &mut self,
+        account_id: AccountId,
+        pet_id: u64,
+        price: U128,
+        #[callback_result] result: Result<bool, PromiseError>,
+    ) -> bool {
+        if matches!(result, Ok(true)) {
+            return true;
+        }
+
+        let mut account = self.account_or_default(&account_id);
+        account.credit_balance += price.0;
+        self.accounts.insert(&account_id, &account);
+
+        let mut window = self.auto_feed_window(&account_id);
+        window.spent = window.spent.saturating_sub(price.0);
+        self.auto_feed_spend.insert(&account_id, &window);
+        self.total_spent = self.total_spent.saturating_sub(price.0);
+
+        self.log_event(
+            "auto_feed_refunded",
+            json!({ "account_id": account_id, "pet_id": pet_id, "amount": price }),
+        );
+
+        false
     }
 
     // ── Feed XP ──────────────────────────────────────────────────────────────
@@ -1145,6 +1298,8 @@ impl PetStake {
         let accrued = acc * account.weight / ACC_PRECISION;
         let pending = account.pending + accrued.saturating_sub(account.reward_debt);
 
+        let auto_feed_spent = self.auto_feed_window(&account_id).spent_in(now);
+
         Some(AccountView {
             account_id,
             staked_pets: account.staked.clone(),
@@ -1152,6 +1307,7 @@ impl PetStake {
             credit_balance: U128(account.credit_balance),
             pending_credits: U128(pending),
             auto_feed_budget: U128(account.auto_feed_budget),
+            auto_feed_spent: U128(auto_feed_spent),
             last_claim_at: U64(account.last_claim_at),
             items: account.items.clone(),
         })
@@ -1254,6 +1410,47 @@ impl PetStake {
             .collect()
     }
 
+    /// Every account auto-feed might have to act for, with what is left of
+    /// today's allowance.
+    ///
+    /// This is what the cron reads: NEAR has no scheduler, so something
+    /// off-chain has to find the accounts that opted in. Filtering here rather
+    /// than in the worker keeps the whole decision on one side — a budget of 0
+    /// never appears in this list at all, which is how "turn it off and see
+    /// that it stopped" holds without the worker having to check anything.
+    ///
+    /// Paged over the *filtered* set: `from_index` counts accounts with a
+    /// budget, not accounts.
+    pub fn get_auto_feed_accounts(
+        &self,
+        from_index: Option<u64>,
+        limit: Option<u64>,
+    ) -> Vec<AutoFeedAccountView> {
+        let from = from_index.unwrap_or(0) as usize;
+        let limit = limit.unwrap_or(100) as usize;
+        let now = env::block_timestamp();
+        let window = AutoFeedWindow::window_of(now);
+
+        self.accounts
+            .iter()
+            .filter(|(_, account)| account.auto_feed_budget > 0)
+            .skip(from)
+            .take(limit)
+            .map(|(account_id, account)| {
+                let spent = self.auto_feed_window(&account_id).spent_in(now);
+                let left = account.auto_feed_budget.saturating_sub(spent);
+                AutoFeedAccountView {
+                    budget: U128(account.auto_feed_budget),
+                    spent: U128(spent),
+                    available: U128(left.min(account.credit_balance)),
+                    credit_balance: U128(account.credit_balance),
+                    window: U64(window),
+                    account_id,
+                }
+            })
+            .collect()
+    }
+
     /// Every credit item and its price, for the shop UI.
     pub fn get_items(&self) -> Vec<(u16, U128)> {
         [ITEM_TONIC, ITEM_WARD, ITEM_LENS, ITEM_CHARM]
@@ -1278,6 +1475,8 @@ impl PetStake {
             "ward_seconds": WARD_SECONDS,
             "wound_seconds": WOUND_SECONDS,
             "lens_feeds": LENS_FEEDS,
+            "auto_feed_window_seconds": AUTO_FEED_WINDOW_SECONDS,
+            "auto_feed_extends_seconds": AUTO_FEED_EXTENDS_SECONDS,
         })
     }
 }
@@ -1386,16 +1585,21 @@ impl PetStake {
 
 // ── Migration ────────────────────────────────────────────────────────────────
 
+// There is one struct definition per layout this contract has ever been
+// deployed with, and one `migrate_*` entry point per struct, each going
+// straight to the current layout. The alternative — a chain of steps the
+// deployer runs in order — reads worse and is worse: two transactions means a
+// window where the newest code is live over state one step behind it.
+//
+// Every addition since has been a *pure append*, so each old layout's bytes are
+// exactly the current one with its tail cut off. That is what makes any of this
+// possible rather than a redeploy, which costs every player their staked pet
+// and their credit balance — and on mainnet is not a thing that can be done at
+// all. See docs/GAME_CONTRACT_V2.md §9.
+
 /// The contract state as it was before `oracle` was added.
-///
-/// Adding a field to the contract struct is a Borsh layout change, and this
-/// repository has already lost two deployments to one (see
-/// docs/GAME_CONTRACT_V2.md §9). `oracle` is appended last, so these bytes are
-/// exactly the new layout minus its final `AccountId` — which is the whole
-/// reason a migration is possible here instead of fresh accounts: a redeploy
-/// with new state costs every player their staked pet and their credit
-/// balance, and on mainnet that is not a thing that can be done at all.
 #[derive(near_sdk::borsh::BorshDeserialize)]
+#[cfg_attr(test, derive(near_sdk::borsh::BorshSerialize))]
 #[borsh(crate = "near_sdk::borsh")]
 struct PetStakeV1 {
     owner_id: AccountId,
@@ -1423,6 +1627,42 @@ struct PetStakeV1 {
     paused: bool,
 }
 
+/// The contract state as it was after `oracle` and before `auto_feed_spend`.
+///
+/// This is what `jg-stake-5656.testnet` holds today: `migrate` has already run
+/// there. `auto_feed_spend` is a new `LookupMap`, which Borsh-serialises as
+/// nothing but its storage prefix, so this layout is again the current one
+/// minus its tail.
+#[derive(near_sdk::borsh::BorshDeserialize)]
+#[cfg_attr(test, derive(near_sdk::borsh::BorshSerialize))]
+#[borsh(crate = "near_sdk::borsh")]
+struct PetStakeV2 {
+    owner_id: AccountId,
+    game_contract: AccountId,
+    granter: AccountId,
+    epoch_budget: u128,
+    total_weight: u128,
+    acc_credit_per_weight: u128,
+    updated_at: u64,
+    accounts: UnorderedMap<AccountId, Account>,
+    pets: UnorderedMap<u64, StakedPet>,
+    prices: LookupMap<String, u128>,
+    pet_states: UnorderedMap<u64, PetState>,
+    item_prices: LookupMap<u16, u128>,
+    battle_wager: u128,
+    battle_rake_bps: u16,
+    total_distributed: u128,
+    total_spent: u128,
+    sale_reserve: u128,
+    faucet_amount: u128,
+    mining_reward: u128,
+    listings: UnorderedMap<u64, Listing>,
+    next_listing_id: u64,
+    market_rake_bps: u16,
+    paused: bool,
+    oracle: AccountId,
+}
+
 #[near]
 impl PetStake {
     /// Deploy over a contract that predates `oracle`, keeping every stake,
@@ -1433,6 +1673,49 @@ impl PetStake {
     #[init(ignore_state)]
     pub fn migrate(oracle: AccountId) -> Self {
         let old: PetStakeV1 = env::state_read().expect("No state to migrate");
+        require!(
+            env::predecessor_account_id() == old.owner_id,
+            "Only the owner can migrate"
+        );
+
+        Self {
+            auto_feed_spend: LookupMap::new(StorageKey::AutoFeedSpend),
+            owner_id: old.owner_id,
+            game_contract: old.game_contract,
+            granter: old.granter,
+            epoch_budget: old.epoch_budget,
+            total_weight: old.total_weight,
+            acc_credit_per_weight: old.acc_credit_per_weight,
+            updated_at: old.updated_at,
+            accounts: old.accounts,
+            pets: old.pets,
+            prices: old.prices,
+            pet_states: old.pet_states,
+            item_prices: old.item_prices,
+            battle_wager: old.battle_wager,
+            battle_rake_bps: old.battle_rake_bps,
+            total_distributed: old.total_distributed,
+            total_spent: old.total_spent,
+            sale_reserve: old.sale_reserve,
+            faucet_amount: old.faucet_amount,
+            mining_reward: old.mining_reward,
+            listings: old.listings,
+            next_listing_id: old.next_listing_id,
+            market_rake_bps: old.market_rake_bps,
+            paused: old.paused,
+            oracle,
+        }
+    }
+
+    /// Deploy over a contract that has `oracle` but not the auto-feed window,
+    /// keeping every stake, balance, item and listing.
+    ///
+    /// Takes no arguments: nothing has to be supplied, because the only new
+    /// state is an empty collection. Every account's auto-feed spend starts at
+    /// zero, which is correct — nothing has ever auto-fed.
+    #[init(ignore_state)]
+    pub fn migrate_auto_feed() -> Self {
+        let old: PetStakeV2 = env::state_read().expect("No state to migrate");
         require!(
             env::predecessor_account_id() == old.owner_id,
             "Only the owner can migrate"
@@ -1462,7 +1745,8 @@ impl PetStake {
             next_listing_id: old.next_listing_id,
             market_rake_bps: old.market_rake_bps,
             paused: old.paused,
-            oracle,
+            oracle: old.oracle,
+            auto_feed_spend: LookupMap::new(StorageKey::AutoFeedSpend),
         }
     }
 }
@@ -1889,6 +2173,495 @@ mod tests {
     fn the_cap_is_exactly_one_perfect_feed() {
         // Mirrors feedXp(1, true) in src/lib/economy/params.ts: 35 * 2.05.
         assert_eq!(MAX_FEED_XP, 72);
+    }
+
+    // ── Auto-feed ────────────────────────────────────────────────────────────
+
+    /// Gives `who` a spendable balance without going near the accumulator, so
+    /// the auto-feed tests are about the budget and nothing else.
+    fn fund_balance(contract: &mut PetStake, who: AccountId, micro_credits: u128) {
+        testing_env!(ctx(owner(), 0).build());
+        contract.fund_reserve(U128(micro_credits));
+        testing_env!(ctx(router(), 0).build());
+        contract.grant_credits(who, U128(micro_credits));
+    }
+
+    /// A player with a 0.1 ACR daily budget and 1 ACR to spend.
+    fn with_auto_feed(budget: u128) -> PetStake {
+        let mut contract = deploy();
+        fund_balance(&mut contract, alice(), ONE_CREDIT);
+
+        testing_env!(ctx(alice(), 0).build());
+        contract.set_auto_feed_budget(U128(budget));
+        contract
+    }
+
+    const AUTO_FEED_PRICE: u128 = 15_000;
+
+    #[test]
+    #[should_panic(expected = "Only the feed oracle can auto-feed")]
+    fn players_cannot_auto_feed_themselves() {
+        let mut contract = with_auto_feed(100_000);
+        testing_env!(ctx(alice(), 10).build());
+        let _ = contract.auto_feed(alice(), 1);
+    }
+
+    /// Not just "a player cannot": a player cannot do it *to their own
+    /// account*, which is the call that looks harmless. Auto-feed has to be
+    /// oracle-only even then, because the daily window is the only thing
+    /// standing between a cron bug and a drained balance, and a player who can
+    /// call it directly can also feed past their own budget by calling it from
+    /// a second account.
+    #[test]
+    #[should_panic(expected = "Only the feed oracle can auto-feed")]
+    fn one_player_cannot_spend_anothers_budget() {
+        let mut contract = with_auto_feed(100_000);
+        testing_env!(ctx(bob(), 10).build());
+        let _ = contract.auto_feed(alice(), 1);
+    }
+
+    #[test]
+    fn the_oracle_can_auto_feed_and_the_player_pays() {
+        let mut contract = with_auto_feed(100_000);
+
+        testing_env!(ctx(oracle(), 10).build());
+        let _ = contract.auto_feed(alice(), 1);
+
+        let view = contract.get_account(alice()).unwrap();
+        assert_eq!(
+            view.credit_balance.0,
+            ONE_CREDIT - AUTO_FEED_PRICE,
+            "the player's balance pays, not the oracle's"
+        );
+        assert_eq!(view.auto_feed_spent.0, AUTO_FEED_PRICE);
+        assert_eq!(contract.get_pool().total_spent.0, AUTO_FEED_PRICE);
+    }
+
+    #[test]
+    fn the_owner_can_auto_feed_too() {
+        let mut contract = with_auto_feed(100_000);
+        testing_env!(ctx(owner(), 10).build());
+        let _ = contract.auto_feed(alice(), 1);
+        assert_eq!(
+            contract.get_account(alice()).unwrap().auto_feed_spent.0,
+            AUTO_FEED_PRICE
+        );
+    }
+
+    /// The acceptance criterion from issue #8: the player turns it off and it
+    /// stops. There is nothing to revoke — the budget *is* the switch.
+    #[test]
+    #[should_panic(expected = "Auto-feed is off for this account")]
+    fn a_budget_of_zero_refuses_outright() {
+        let mut contract = with_auto_feed(0);
+        testing_env!(ctx(oracle(), 10).build());
+        let _ = contract.auto_feed(alice(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Auto-feed is off for this account")]
+    fn turning_the_budget_back_to_zero_stops_it() {
+        let mut contract = with_auto_feed(100_000);
+
+        testing_env!(ctx(oracle(), 10).build());
+        let _ = contract.auto_feed(alice(), 1);
+
+        testing_env!(ctx(alice(), 20).build());
+        contract.set_auto_feed_budget(U128(0));
+
+        testing_env!(ctx(oracle(), 30).build());
+        let _ = contract.auto_feed(alice(), 1);
+    }
+
+    /// A budget of two feeds buys exactly two, and the third is refused — not
+    /// rounded down, not deferred, refused.
+    #[test]
+    #[should_panic(expected = "Today's auto-feed budget is used up")]
+    fn spending_stops_at_the_daily_budget() {
+        let mut contract = with_auto_feed(AUTO_FEED_PRICE * 2);
+
+        testing_env!(ctx(oracle(), 10).build());
+        let _ = contract.auto_feed(alice(), 1);
+        testing_env!(ctx(oracle(), 20).build());
+        let _ = contract.auto_feed(alice(), 1);
+
+        assert_eq!(
+            contract.get_account(alice()).unwrap().auto_feed_spent.0,
+            AUTO_FEED_PRICE * 2
+        );
+
+        testing_env!(ctx(oracle(), 30).build());
+        let _ = contract.auto_feed(alice(), 1);
+    }
+
+    /// A budget smaller than one feed buys nothing. Worth pinning separately:
+    /// the slider's step is 0.05 ACR and the price is 0.015, so "a budget that
+    /// cannot afford a single feed" is a setting a player can actually reach by
+    /// lowering it after a feed has already landed.
+    #[test]
+    #[should_panic(expected = "Today's auto-feed budget is used up")]
+    fn a_budget_below_one_feed_buys_nothing() {
+        let mut contract = with_auto_feed(AUTO_FEED_PRICE - 1);
+        testing_env!(ctx(oracle(), 10).build());
+        let _ = contract.auto_feed(alice(), 1);
+    }
+
+    #[test]
+    fn the_window_resets_the_next_day() {
+        let mut contract = with_auto_feed(AUTO_FEED_PRICE);
+
+        testing_env!(ctx(oracle(), 10).build());
+        let _ = contract.auto_feed(alice(), 1);
+
+        // Same window, so still spent.
+        testing_env!(ctx(oracle(), AUTO_FEED_WINDOW_SECONDS - 1).build());
+        assert_eq!(
+            contract.get_account(alice()).unwrap().auto_feed_spent.0,
+            AUTO_FEED_PRICE
+        );
+
+        // Over the boundary: the allowance is back without anything having
+        // been written, which is the point of deriving the window from the
+        // timestamp rather than storing a deadline.
+        testing_env!(ctx(oracle(), AUTO_FEED_WINDOW_SECONDS).build());
+        assert_eq!(contract.get_account(alice()).unwrap().auto_feed_spent.0, 0);
+
+        let _ = contract.auto_feed(alice(), 1);
+        assert_eq!(
+            contract.get_account(alice()).unwrap().credit_balance.0,
+            ONE_CREDIT - AUTO_FEED_PRICE * 2
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Not enough credits to auto-feed")]
+    fn auto_feed_cannot_overdraw_the_balance() {
+        let mut contract = deploy();
+        testing_env!(ctx(alice(), 0).build());
+        contract.set_auto_feed_budget(U128(ONE_CREDIT));
+
+        testing_env!(ctx(oracle(), 10).build());
+        let _ = contract.auto_feed(alice(), 1);
+    }
+
+    /// The game contract refuses a pet that has starved, been sold, or never
+    /// existed. The credits are already debited by then, so the callback has to
+    /// put them back — otherwise a cron pointed at a dead pet costs its former
+    /// owner a day's budget for nothing.
+    #[test]
+    fn a_refused_feed_gives_the_credits_back() {
+        let mut contract = with_auto_feed(AUTO_FEED_PRICE);
+
+        testing_env!(ctx(oracle(), 10).build());
+        let _ = contract.auto_feed(alice(), 7);
+        assert_eq!(
+            contract.get_account(alice()).unwrap().credit_balance.0,
+            ONE_CREDIT - AUTO_FEED_PRICE
+        );
+
+        // What the game contract returns when the pet is not feedable.
+        testing_env!(ctx(env::current_account_id(), 10).build());
+        let fed = contract.on_auto_fed(alice(), 7, U128(AUTO_FEED_PRICE), Ok(false));
+        assert!(!fed);
+
+        let view = contract.get_account(alice()).unwrap();
+        assert_eq!(view.credit_balance.0, ONE_CREDIT, "balance restored exactly");
+        assert_eq!(view.auto_feed_spent.0, 0, "and the day's allowance with it");
+        assert_eq!(contract.get_pool().total_spent.0, 0);
+    }
+
+    /// A refund must free the allowance, not just the credits — a player whose
+    /// pet had starved would otherwise be locked out for the rest of the day
+    /// after buying a revival.
+    #[test]
+    fn a_refund_frees_the_allowance_for_another_pet() {
+        let mut contract = with_auto_feed(AUTO_FEED_PRICE);
+
+        testing_env!(ctx(oracle(), 10).build());
+        let _ = contract.auto_feed(alice(), 7);
+
+        testing_env!(ctx(env::current_account_id(), 10).build());
+        contract.on_auto_fed(alice(), 7, U128(AUTO_FEED_PRICE), Ok(false));
+
+        testing_env!(ctx(oracle(), 20).build());
+        let _ = contract.auto_feed(alice(), 1);
+        assert_eq!(
+            contract.get_account(alice()).unwrap().auto_feed_spent.0,
+            AUTO_FEED_PRICE
+        );
+    }
+
+    #[test]
+    fn a_successful_feed_keeps_the_credits() {
+        let mut contract = with_auto_feed(AUTO_FEED_PRICE);
+
+        testing_env!(ctx(oracle(), 10).build());
+        let _ = contract.auto_feed(alice(), 1);
+
+        testing_env!(ctx(env::current_account_id(), 10).build());
+        assert!(contract.on_auto_fed(alice(), 1, U128(AUTO_FEED_PRICE), Ok(true)));
+
+        let view = contract.get_account(alice()).unwrap();
+        assert_eq!(view.credit_balance.0, ONE_CREDIT - AUTO_FEED_PRICE);
+        assert_eq!(view.auto_feed_spent.0, AUTO_FEED_PRICE);
+    }
+
+    #[test]
+    #[should_panic(expected = "The AI lab is paused")]
+    fn pausing_the_lab_stops_auto_feed() {
+        let mut contract = with_auto_feed(100_000);
+        testing_env!(ctx(owner(), 0).build());
+        contract.set_paused(true);
+        testing_env!(ctx(oracle(), 10).build());
+        let _ = contract.auto_feed(alice(), 1);
+    }
+
+    /// What the cron reads. A budget of 0 must not appear at all: that is how
+    /// "turn it off" holds without the worker checking anything.
+    #[test]
+    fn the_cron_only_sees_accounts_that_opted_in() {
+        let mut contract = deploy();
+        fund_balance(&mut contract, alice(), ONE_CREDIT);
+        fund_balance(&mut contract, bob(), ONE_CREDIT);
+
+        testing_env!(ctx(alice(), 0).build());
+        contract.set_auto_feed_budget(U128(100_000));
+        testing_env!(ctx(bob(), 0).build());
+        contract.set_auto_feed_budget(U128(0));
+
+        testing_env!(ctx(oracle(), 10).build());
+        let listed = contract.get_auto_feed_accounts(None, None);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].account_id, alice());
+        assert_eq!(listed[0].budget.0, 100_000);
+        assert_eq!(listed[0].spent.0, 0);
+        assert_eq!(listed[0].available.0, 100_000);
+
+        let _ = contract.auto_feed(alice(), 1);
+        let listed = contract.get_auto_feed_accounts(None, None);
+        assert_eq!(listed[0].spent.0, AUTO_FEED_PRICE);
+        assert_eq!(listed[0].available.0, 100_000 - AUTO_FEED_PRICE);
+    }
+
+    /// `available` is what auto-feed could actually spend, so a budget the
+    /// balance cannot cover reports the balance. Without this the cron would
+    /// plan feeds that the contract then refuses one by one.
+    #[test]
+    fn the_cron_is_told_the_smaller_of_budget_and_balance() {
+        let mut contract = deploy();
+        fund_balance(&mut contract, alice(), 20_000);
+        testing_env!(ctx(alice(), 0).build());
+        contract.set_auto_feed_budget(U128(ONE_CREDIT));
+
+        testing_env!(ctx(oracle(), 10).build());
+        let listed = contract.get_auto_feed_accounts(None, None);
+        assert_eq!(listed[0].budget.0, ONE_CREDIT);
+        assert_eq!(listed[0].credit_balance.0, 20_000);
+        assert_eq!(listed[0].available.0, 20_000);
+    }
+
+    // ── Migration ────────────────────────────────────────────────────────────
+
+    /// Lay down the live pre-auto-feed layout, then deploy over it.
+    ///
+    /// This is the half of a migration that cannot be checked by reading the
+    /// code: the question is whether the *bytes* the old contract wrote are
+    /// still readable, and the only way to ask is to write them and read them
+    /// back. §9 of docs/GAME_CONTRACT_V2.md is two deployments lost to getting
+    /// this wrong.
+    #[test]
+    fn migrating_from_the_oracle_layout_keeps_every_number() {
+        let mut contract = deploy();
+        fund_balance(&mut contract, alice(), 50_000);
+        testing_env!(ctx(owner(), 0).build());
+        contract.admin_set_pet(1, alice(), attrs(3, 1, 2, Rarity::Epic));
+        testing_env!(ctx(alice(), 0).build());
+        contract.set_auto_feed_budget(U128(100_000));
+
+        let before_pool = contract.get_pool();
+        let before_account = contract.get_account(alice()).unwrap();
+
+        // Serialise it as the previous layout — exactly what is on
+        // jg-stake-5656.testnet today — and drop the auto-feed map.
+        testing_env!(ctx(owner(), 0).build());
+        env::state_write(&PetStakeV2 {
+            owner_id: contract.owner_id.clone(),
+            game_contract: contract.game_contract.clone(),
+            granter: contract.granter.clone(),
+            epoch_budget: contract.epoch_budget,
+            total_weight: contract.total_weight,
+            acc_credit_per_weight: contract.acc_credit_per_weight,
+            updated_at: contract.updated_at,
+            accounts: contract.accounts,
+            pets: contract.pets,
+            prices: contract.prices,
+            pet_states: contract.pet_states,
+            item_prices: contract.item_prices,
+            battle_wager: contract.battle_wager,
+            battle_rake_bps: contract.battle_rake_bps,
+            total_distributed: contract.total_distributed,
+            total_spent: contract.total_spent,
+            sale_reserve: contract.sale_reserve,
+            faucet_amount: contract.faucet_amount,
+            mining_reward: contract.mining_reward,
+            listings: contract.listings,
+            next_listing_id: contract.next_listing_id,
+            market_rake_bps: contract.market_rake_bps,
+            paused: contract.paused,
+            oracle: contract.oracle.clone(),
+        });
+
+        let migrated = PetStake::migrate_auto_feed();
+
+        let after_pool = migrated.get_pool();
+        assert_eq!(after_pool.total_weight.0, before_pool.total_weight.0);
+        assert_eq!(after_pool.staked_pets, before_pool.staked_pets);
+        assert_eq!(after_pool.total_distributed.0, before_pool.total_distributed.0);
+        assert_eq!(after_pool.total_spent.0, before_pool.total_spent.0);
+        assert_eq!(after_pool.sale_reserve.0, before_pool.sale_reserve.0);
+        assert_eq!(after_pool.epoch_budget.0, before_pool.epoch_budget.0);
+
+        let after_account = migrated.get_account(alice()).unwrap();
+        assert_eq!(after_account.credit_balance.0, before_account.credit_balance.0);
+        assert_eq!(after_account.weight.0, before_account.weight.0);
+        assert_eq!(after_account.staked_pets, before_account.staked_pets);
+        assert_eq!(
+            after_account.auto_feed_budget.0, before_account.auto_feed_budget.0,
+            "the budget players already set survives"
+        );
+        assert_eq!(after_account.auto_feed_spent.0, 0, "nothing has auto-fed yet");
+        assert_eq!(migrated.oracle, oracle(), "and the oracle stays named");
+    }
+
+    /// And the new map is usable straight after the migration, rather than
+    /// being a prefix that happens to deserialise.
+    #[test]
+    fn auto_feed_works_after_the_migration() {
+        let mut contract = deploy();
+        fund_balance(&mut contract, alice(), ONE_CREDIT);
+        testing_env!(ctx(alice(), 0).build());
+        contract.set_auto_feed_budget(U128(100_000));
+
+        testing_env!(ctx(owner(), 0).build());
+        env::state_write(&PetStakeV2 {
+            owner_id: contract.owner_id.clone(),
+            game_contract: contract.game_contract.clone(),
+            granter: contract.granter.clone(),
+            epoch_budget: contract.epoch_budget,
+            total_weight: contract.total_weight,
+            acc_credit_per_weight: contract.acc_credit_per_weight,
+            updated_at: contract.updated_at,
+            accounts: contract.accounts,
+            pets: contract.pets,
+            prices: contract.prices,
+            pet_states: contract.pet_states,
+            item_prices: contract.item_prices,
+            battle_wager: contract.battle_wager,
+            battle_rake_bps: contract.battle_rake_bps,
+            total_distributed: contract.total_distributed,
+            total_spent: contract.total_spent,
+            sale_reserve: contract.sale_reserve,
+            faucet_amount: contract.faucet_amount,
+            mining_reward: contract.mining_reward,
+            listings: contract.listings,
+            next_listing_id: contract.next_listing_id,
+            market_rake_bps: contract.market_rake_bps,
+            paused: contract.paused,
+            oracle: contract.oracle.clone(),
+        });
+
+        let mut migrated = PetStake::migrate_auto_feed();
+
+        testing_env!(ctx(oracle(), 10).build());
+        let _ = migrated.auto_feed(alice(), 1);
+        assert_eq!(
+            migrated.get_account(alice()).unwrap().auto_feed_spent.0,
+            AUTO_FEED_PRICE
+        );
+    }
+
+    /// The V1 path is still the one a deployment that predates `oracle` takes,
+    /// and it now has to initialise two appended things rather than one.
+    #[test]
+    fn migrating_from_the_pre_oracle_layout_still_works() {
+        let mut contract = deploy();
+        fund_balance(&mut contract, alice(), 50_000);
+
+        testing_env!(ctx(owner(), 0).build());
+        env::state_write(&PetStakeV1 {
+            owner_id: contract.owner_id.clone(),
+            game_contract: contract.game_contract.clone(),
+            granter: contract.granter.clone(),
+            epoch_budget: contract.epoch_budget,
+            total_weight: contract.total_weight,
+            acc_credit_per_weight: contract.acc_credit_per_weight,
+            updated_at: contract.updated_at,
+            accounts: contract.accounts,
+            pets: contract.pets,
+            prices: contract.prices,
+            pet_states: contract.pet_states,
+            item_prices: contract.item_prices,
+            battle_wager: contract.battle_wager,
+            battle_rake_bps: contract.battle_rake_bps,
+            total_distributed: contract.total_distributed,
+            total_spent: contract.total_spent,
+            sale_reserve: contract.sale_reserve,
+            faucet_amount: contract.faucet_amount,
+            mining_reward: contract.mining_reward,
+            listings: contract.listings,
+            next_listing_id: contract.next_listing_id,
+            market_rake_bps: contract.market_rake_bps,
+            paused: contract.paused,
+        });
+
+        let mut migrated = PetStake::migrate(oracle());
+        assert_eq!(migrated.get_account(alice()).unwrap().credit_balance.0, 50_000);
+        assert_eq!(migrated.oracle, oracle());
+
+        testing_env!(ctx(alice(), 0).build());
+        migrated.set_auto_feed_budget(U128(100_000));
+        testing_env!(ctx(oracle(), 10).build());
+        let _ = migrated.auto_feed(alice(), 1);
+        assert_eq!(
+            migrated.get_account(alice()).unwrap().auto_feed_spent.0,
+            AUTO_FEED_PRICE
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Only the owner can migrate")]
+    fn players_cannot_migrate_the_contract() {
+        let contract = deploy();
+        testing_env!(ctx(owner(), 0).build());
+        env::state_write(&PetStakeV2 {
+            owner_id: contract.owner_id.clone(),
+            game_contract: contract.game_contract.clone(),
+            granter: contract.granter.clone(),
+            epoch_budget: contract.epoch_budget,
+            total_weight: contract.total_weight,
+            acc_credit_per_weight: contract.acc_credit_per_weight,
+            updated_at: contract.updated_at,
+            accounts: contract.accounts,
+            pets: contract.pets,
+            prices: contract.prices,
+            pet_states: contract.pet_states,
+            item_prices: contract.item_prices,
+            battle_wager: contract.battle_wager,
+            battle_rake_bps: contract.battle_rake_bps,
+            total_distributed: contract.total_distributed,
+            total_spent: contract.total_spent,
+            sale_reserve: contract.sale_reserve,
+            faucet_amount: contract.faucet_amount,
+            mining_reward: contract.mining_reward,
+            listings: contract.listings,
+            next_listing_id: contract.next_listing_id,
+            market_rake_bps: contract.market_rake_bps,
+            paused: contract.paused,
+            oracle: contract.oracle.clone(),
+        });
+
+        testing_env!(ctx(alice(), 0).build());
+        PetStake::migrate_auto_feed();
     }
 
     #[test]

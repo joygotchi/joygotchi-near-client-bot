@@ -2,6 +2,8 @@
   import ConnectWallet from '#lib/components/ConnectWallet.svelte';
   import AppShell from '#lib/components/AppShell.svelte';
   import {
+    AUTO_FEED_EXTENDS_SECONDS,
+    AUTO_FEED_WHEN_UNDER_SECONDS,
     BATTLE_WAGER_CREDITS,
     CREDIT_ITEM_LIST,
     FAUCET_GRANT_CREDITS,
@@ -46,6 +48,19 @@
   });
 
   const pending = $derived(liveCredits(now));
+
+  /**
+   * Auto-feeds the rest of today's budget still covers.
+   *
+   * Floored the same way the contract and the cron floor it: a remaining 0.01
+   * credit buys no feed at all, and saying "0.01 left" where the player reads
+   * "still working" is the kind of promise this whole feature was broken by.
+   */
+  const feedsLeftToday = $derived(
+    Math.floor(
+      Math.max(0, player.autoFeedBudget - player.autoFeedSpent) / SINKS.auto_feed.credits
+    )
+  );
   const share = $derived(
     player.totalWeight > 0 ? (player.weight / player.totalWeight) * 100 : 0
   );
@@ -238,9 +253,23 @@
           <small class="text-[#00000075]">{autoFeed.toFixed(2)} credit / day</small>
         </div>
         <small class="text-[0.6rem] text-[#00000088]">
-          While you are away, your pets feed themselves from your credit balance. Set it to 0 to
-          turn it off.
+          While you are away, any pet of yours within {AUTO_FEED_WHEN_UNDER_SECONDS / 3600} hours of
+          starving is fed from your credit balance — {SINKS.auto_feed.credits} credit for
+          {AUTO_FEED_EXTENDS_SECONDS / 3600} more hours of life. Spending stops at the budget below,
+          which resets at 00:00 UTC. Set it to 0 to turn it off.
         </small>
+        {#if player.autoFeedBudget > 0}
+          <small class="text-[0.6rem] text-[#00000088]">
+            Spent today: {formatCredits(player.autoFeedSpent)} of {formatCredits(
+              player.autoFeedBudget
+            )} credit
+            {#if feedsLeftToday > 0}
+              · {feedsLeftToday} more {feedsLeftToday === 1 ? 'feed' : 'feeds'} covered
+            {:else}
+              · today's budget is used up
+            {/if}
+          </small>
+        {/if}
         <input
           type="range"
           min="0"

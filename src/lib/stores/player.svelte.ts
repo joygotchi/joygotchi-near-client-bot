@@ -30,6 +30,8 @@ export const player = $state({
   weight: 0,
   totalWeight: 0,
   autoFeedBudget: 0,
+  /** Of that budget, what auto-feed has already spent in today's window. */
+  autoFeedSpent: 0,
   /** Item and battle state, keyed by pet id. */
   petStates: {} as Record<number, PetStateView>,
   /** Wall-clock ms of the last refresh, used to extrapolate pending credits. */
@@ -85,6 +87,7 @@ export async function refreshPlayer(force = false): Promise<void> {
     player.credits = Number(formatAmount(stake.credit_balance, CREDIT_DECIMALS));
     player.pendingCredits = Number(formatAmount(stake.pending_credits, CREDIT_DECIMALS));
     player.autoFeedBudget = Number(formatAmount(stake.auto_feed_budget, CREDIT_DECIMALS));
+    player.autoFeedSpent = Number(formatAmount(stake.auto_feed_spent ?? '0', CREDIT_DECIMALS));
     player.stakedPetIds = stake.staked_pets ?? [];
     player.weight = Number(stake.weight || '0');
     player.totalWeight = Number(pool?.total_weight || '0');

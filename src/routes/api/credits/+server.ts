@@ -35,6 +35,7 @@ export const GET: RequestHandler = async ({ url, fetch, setHeaders }) => {
     balance: Number(formatAmount(account.credit_balance, CREDIT_DECIMALS)),
     pending: Number(formatAmount(account.pending_credits, CREDIT_DECIMALS)),
     autoFeedBudget: Number(formatAmount(account.auto_feed_budget, CREDIT_DECIMALS)),
+    autoFeedSpent: Number(formatAmount(account.auto_feed_spent ?? '0', CREDIT_DECIMALS)),
     creditsPerSecond: perSecond,
     creditsPerDay: perSecond * 86_400,
     epochBudget,

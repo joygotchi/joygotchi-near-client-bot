@@ -95,6 +95,70 @@ pub const MAX_FEED_XP: u32 = 72;
 /// How long between mining claims.
 pub const MINING_COOLDOWN_SECONDS: u64 = 6 * 60 * 60;
 
+/// The length of one auto-feed allowance window.
+pub const AUTO_FEED_WINDOW_SECONDS: u64 = 24 * 60 * 60;
+
+/// How much life one auto-feed buys, mirroring `AUTO_FEED_SECONDS` in
+/// contracts/game. Published through `get_config` so the cron that picks which
+/// pets to feed does not have to hard-code it.
+pub const AUTO_FEED_EXTENDS_SECONDS: u64 = 12 * 60 * 60;
+
+/// What an account has spent on auto-feeding inside the current window.
+///
+/// Kept in its own `LookupMap` rather than as two more fields on `Account`,
+/// and that is the whole reason this change is a one-call migration. `Account`
+/// is a *stored* struct held once per player: appending to it would make every
+/// existing entry undeserialisable and force the migration to walk and rewrite
+/// the entire account map. A new collection is only a new storage prefix, so
+/// the append stays where §9 of docs/GAME_CONTRACT_V2.md wants it — on the
+/// contract struct, last, with the old bytes a prefix of the new layout.
+///
+/// It is also the honest home for it: this is derived, expiring bookkeeping,
+/// not part of the player's ledger. The budget itself stays on `Account`.
+#[derive(BorshSerialize, BorshDeserialize, Default, Clone, Debug)]
+#[borsh(crate = "near_sdk::borsh")]
+pub struct AutoFeedWindow {
+    /// Window index: `block_timestamp / AUTO_FEED_WINDOW_SECONDS`, so windows
+    /// are fixed UTC days rather than anchored to a player's first feed. A
+    /// fixed boundary is what lets the UI say "resets at 00:00 UTC" and lets
+    /// the cron reason about the day without reading when each player last fed.
+    pub window: u64,
+    /// Micro-credits auto-fed during that window.
+    pub spent: u128,
+}
+
+impl AutoFeedWindow {
+    /// The window `now` (in nanoseconds) falls in.
+    pub fn window_of(now: u64) -> u64 {
+        now / (AUTO_FEED_WINDOW_SECONDS * NANOS_PER_SECOND)
+    }
+
+    /// What has been spent in the window containing `now` — zero once the
+    /// window has rolled over, which is what makes the allowance daily.
+    pub fn spent_in(&self, now: u64) -> u128 {
+        if self.window == Self::window_of(now) {
+            self.spent
+        } else {
+            0
+        }
+    }
+}
+
+/// One account the auto-feed cron may have to act for.
+#[near(serializers = [json])]
+pub struct AutoFeedAccountView {
+    pub account_id: AccountId,
+    /// Daily allowance, in micro-credits.
+    pub budget: U128,
+    /// Spent inside the current window.
+    pub spent: U128,
+    /// `budget - spent`, floored at zero, and capped by the credit balance:
+    /// what auto-feed could actually spend right now.
+    pub available: U128,
+    pub credit_balance: U128,
+    pub window: U64,
+}
+
 /// Every item that can drop, in ascending order of value.
 pub const DROPPABLE_ITEMS: [u16; 4] = [ITEM_TONIC, ITEM_CHARM, ITEM_LENS, ITEM_WARD];
 
@@ -228,6 +292,8 @@ pub struct AccountView {
     pub credit_balance: U128,
     pub pending_credits: U128,
     pub auto_feed_budget: U128,
+    /// Auto-feed credits already spent in the current window.
+    pub auto_feed_spent: U128,
     pub last_claim_at: U64,
     /// Unused items, as (item_id, count).
     pub items: Vec<(u16, u32)>,

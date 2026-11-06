@@ -206,8 +206,12 @@ The key the backend signs with is a **function-call** access key, not a
 full-access one. Making it, for an oracle account that already exists:
 
 ```bash
-near account add-key oracle.jg-stake-5656.testnet grant-function-call-access   --allowance '0.25 NEAR'   --contract-account-id jg-stake-5656.testnet   --function-names 'award_feed_xp'   use-manually-provided-public-key ed25519:...   network-config testnet sign-with-keychain send
+near account add-key oracle.jg-stake-5656.testnet grant-function-call-access   --allowance '0.25 NEAR'   --contract-account-id jg-stake-5656.testnet   --function-names 'award_feed_xp,auto_feed'   use-manually-provided-public-key ed25519:...   network-config testnet sign-with-keychain send
 ```
+
+Both methods, one key. `auto_feed` is the other thing the oracle does (see
+below); an access key's `--function-names` is a list, so widening it is a
+comma, not a second key or a full-access one.
 
 Then `NEAR_ORACLE_ACCOUNT_ID` and `NEAR_ORACLE_PRIVATE_KEY` in `.env`, and
 `set_oracle` so the contract agrees. The restriction is enforced by the chain,
@@ -217,6 +221,7 @@ contract at all:
 ```
 jg-stake::claim_faucet   InvalidAccessKeyError::MethodNameMismatch
 jg-stake::set_oracle     InvalidAccessKeyError::MethodNameMismatch
+jg-stake::spend_credits  InvalidAccessKeyError::MethodNameMismatch
 jg-game::award_xp        InvalidAccessKeyError::ReceiverMismatch
 ```
 
@@ -224,6 +229,47 @@ Two things to know about the allowance: it is spent on gas, so the key stops
 working once it runs out (re-add it to top up), and leaving it off makes it
 unlimited, which caps the damage from a leak at the oracle account's balance
 instead. Either way the account wants a small balance and nothing else on it.
+
+
+### Auto-feed
+
+The same oracle key drives auto-feed (issue #8):
+
+```rust
+pub fn auto_feed(&mut self, account_id: AccountId, pet_id: u64) -> Promise;  // oracle or owner
+pub fn set_auto_feed_budget(&mut self, budget: U128);                       // the player
+pub fn get_auto_feed_accounts(from_index: Option<u64>, limit: Option<u64>);  // view
+```
+
+`set_auto_feed_budget` has stored a daily allowance per account since this
+contract shipped and nothing ever spent it. The obvious way to spend it does
+not work: `spend_credits` debits `env::predecessor_account_id()`, so a server
+key calling it would spend the *server's* credits. The oracle account has no
+credit balance and must never have one.
+
+So `auto_feed` names the account instead, and the contract debits that account's
+balance against that account's own budget. The limit is therefore on the chain
+rather than a convention in a worker, and turning the budget to 0 stops
+auto-feeding with nothing to revoke. A compromised oracle can spend at most one
+player's daily budget per day, on that player's own pets, on nothing but food.
+
+The starving deadline lives on the game contract, which had no caller-gated way
+to move it — `buy_item` is `assert_pet_owner` plus an attached NEAR deposit,
+neither of which a server key signing for an absent player can satisfy. Hence
+`game::feed_from_stake(pet_id, owner_id)`, gated exactly like `award_xp`, which
+re-checks that the pet is `owner_id`'s and still alive and returns `false`
+rather than panicking. `auto_feed` debits first and refunds in its callback on a
+`false`, so a cron pointed at a dead pet costs nobody anything.
+
+Auto-feed grants **no XP**. There is no inference and so no taste multiplier to
+grade the meal: it keeps a pet alive while its owner is away rather than
+levelling it in their absence.
+
+The scheduler is `/api/cron/auto-feed`, run from `vercel.json` (NEAR has no
+cron). It needs `CRON_SECRET`, which Vercel Cron sends as
+`Authorization: Bearer`, and refuses every request when that is unset — the
+route spends players' credits, so an open endpoint drains every budget on the
+deployment one call at a time.
 
 ## mint-router — multichain mints
 

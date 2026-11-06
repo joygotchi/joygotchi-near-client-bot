@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/auto-feed",
+      "schedule": "0 * * * *"
+    }
+  ]
+}

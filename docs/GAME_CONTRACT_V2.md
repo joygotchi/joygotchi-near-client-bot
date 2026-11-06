@@ -279,6 +279,23 @@ immortal in one sitting. Feeding that levels the pet re-syncs staking weight.
 Credit items in `pet-stake` (Tonic, Ward, Lens, Charm) are a separate set and
 unaffected.
 
+Auto-feed needs a second door, because `buy_item` is `assert_pet_owner` plus an
+attached NEAR deposit and a server key signing for an absent player can satisfy
+neither:
+
+```rust
+fn feed_from_stake(&mut self, pet_id: u64, owner_id: AccountId) -> bool;  // pet-stake only
+```
+
+It is gated exactly like `award_xp`, extends by a fixed `AUTO_FEED_SECONDS`
+(12h — half a meal, so two a day keep a pet alive) under the same seven-day
+ceiling, and grants **no XP**. The extension is fixed here rather than passed
+in, so `pet-stake` — and therefore the server key that drives it — cannot ask
+for an arbitrary amount of life. It returns `false` rather than panicking when
+the pet is gone, belongs to someone else or has already starved, because the
+caller refunds on a `false` and a panic across a cross-contract boundary loses
+which of the three it was.
+
 ---
 
 ## 5 · Keeping weight honest
@@ -310,6 +327,7 @@ one.
 | `nft_transfer` / `nft_approve` | pet owner or approved, **and not staked** |
 | `set_staked` (if adopted) | **`pet-stake` only** |
 | `award_xp` | **`pet-stake` only**, or the owner |
+| `feed_from_stake` | **`pet-stake` only**, or the owner |
 | `migrate` | owner, once |
 
 `award_xp` is where feed XP arrives, via `pet-stake::award_feed_xp`, which is
@@ -711,6 +729,113 @@ after    total_weight 100  staked_pets 1  total_distributed 244399  total_spent 
 `contracts/migrate-testnet.sh` is that path; `deploy-testnet.sh` still runs
 `new` and is for fresh accounts only, which its header now says.
 
+### Auto-feed spends the budget, and the budget is the off switch
+
+`set_auto_feed_budget` had stored a daily allowance per account since the
+staking contract shipped, and the AI Lab had a slider that wrote it, and
+nothing had ever spent it (issue #8). A pet whose owner was away starved with a
+full allowance sitting unused.
+
+The route that looks obvious does not work. `spend_credits` debits
+`env::predecessor_account_id()`, so a server key calling it would spend the
+*server's* credits; the oracle account has no credit balance and must never
+have one. The delegated-key reading therefore means a key on each *player's*
+account — one per player to custody, a revocation to notice, and nothing on
+chain holding it to the budget.
+
+So the budget is spent by an oracle-gated `auto_feed(account_id, pet_id)` that
+names the account: the contract debits that account's balance against that
+account's own allowance. The limit lives on the chain rather than in the worker,
+and a budget of 0 is the entire off switch — nothing to revoke.
+
+Proved live on `jg-stake-5656.testnet` and `jg-game-5656.testnet`, with
+`jg-p3-72362.testnet` as the player. Budget set to 30,000 micro-credits, two
+feeds' worth:
+
+```
+pet 2   starves_at 1793951402572126009 → 1793994602572126009   (+43,200s, exactly 12h)
+pet 3   starves_at 1793978723770948862 → 1794021923770948862   (+43,200s)
+balance 1,011,066 → 996,066 → 981,066   (−15,000 each, the configured price)
+spent_today 15,000 → 30,000 of 30,000
+
+feed 3  Smart contract panicked: Today's auto-feed budget is used up
+        pet 4's starves_at unchanged at 1793979438886671642, balance unchanged
+budget 0, then auto_feed:
+        Smart contract panicked: Auto-feed is off for this account
+        get_auto_feed_accounts → []
+```
+
+Both events fire on a feed — `auto_fed` from the staking contract and
+`pet_auto_fed` from the game contract — and the game contract's refusal path
+refunds exactly:
+
+```
+auto_feed(pet_id: 999)
+  auto_fed             amount 15,000  spent_today 45,000
+  No such pet                                   ← game contract, returning false
+  auto_feed_refunded   amount 15,000
+  balance back to 981,066, spent_today back to 30,000
+```
+
+The refund matters because the credits are debited *before* the cross-contract
+call, not after. That ordering is what makes the budget check atomic — two
+calls landing in the same block would otherwise both see a full allowance — so
+the price of it is a callback that puts the balance, the allowance and
+`total_spent` back when the feed was refused.
+
+**The migration, again, and this time two of them.** The window is two numbers
+per account, and `Account` is a *stored* struct held once per player: appending
+to it would make every existing entry undeserialisable and force the migration
+to walk and rewrite the whole account map. So the window lives in its own
+`LookupMap` instead, which Borsh-serialises as nothing but a storage prefix —
+the append stays on the contract struct, last, where §9 wants it, and the
+migration stays O(1). There is now one `#[init(ignore_state)]` entry point per
+layout this contract has ever held (`migrate(oracle)`, `migrate_auto_feed()`),
+each going straight to the current one rather than chaining; `migrate-testnet.sh`
+reads `get_config` and picks.
+
+Every number came back unchanged, as it did for `oracle`:
+
+```
+before   total_weight 105  staked_pets 1  total_distributed 771211  total_spent 40000  sale_reserve 48986250
+after    total_weight 105  staked_pets 1  total_distributed 771211  total_spent 40000  sale_reserve 48986250
+         auto_feed_window_seconds 86400  auto_feed_extends_seconds 43200
+         all four pets identical: levels 1/0/1/2, xp 20/25/28/16, deadlines unchanged
+```
+
+The game contract needed no migration at all: it gained a *method*, and a
+method is not stored state, so `without-init-call` keeps every pet as it is.
+Worth recording as the cheap case, since §9 reads as though every contract
+change is a layout change.
+
+**Auto-feed grants no XP**, deliberately. There is no inference and so no taste
+multiplier to grade the meal: it should keep a pet alive while its owner is
+away, not level it in their absence.
+
+**The scheduler is off-chain, because NEAR has no cron.**
+`/api/cron/auto-feed`, run hourly from `vercel.json`, reads
+`get_auto_feed_accounts`, reads each account's pets, and feeds the ones within
+six hours of starving, nearest deadline first. It holds no authority worth
+having — the budget, the window, the balance and the pet's ownership are all
+re-checked on chain, so a bug there wastes gas rather than credits. The
+selection and budget arithmetic is a pure `planAutoFeeds`, unit-tested, and
+`?dryRun=1` reads and plans without signing. Against live testnet state, with a
+60,000 budget of which 30,000 was already spent:
+
+```
+available 30,000, price 15,000  → two feeds affordable
+pets      1: 24,108s   2: 67,322s   3: 94,643s   4: 52,158s left
+planned   nothing at the real 6h threshold
+          at whenUnder=60,000: pets 1 then 4 — nearest first, 2 feeds, 3 out of range
+```
+
+**Still open:** the deployed function-call key permits `award_feed_xp` only, so
+the chain refuses `auto_feed` from the server until a key permitting both
+exists. The live proof above was signed as the staking contract's owner, which
+`auto_feed` accepts on the same branch of the same check as the oracle. Adding
+the key needs the oracle account's full-access secret; the invocation is in
+"The feed-XP oracle" in contracts/README.md, with
+`--function-names 'award_feed_xp,auto_feed'`.
 ### A sink that charged for nothing — removed
 
 `revive` was seeded into `pet-stake`'s `prices` at 1 credit and listed in the
