@@ -9,6 +9,15 @@ pub const STARVE_SECONDS: u64 = 24 * 60 * 60;
 /// Ceiling on banked food, so a whale cannot make a pet immortal in one go.
 pub const MAX_STARVE_SECONDS: u64 = 7 * 24 * 60 * 60;
 
+/// How much life one auto-feed buys — half a full meal.
+///
+/// Fixed here rather than passed in by `pet-stake`, so the staking contract
+/// (and therefore the server key that drives it) cannot ask for an arbitrary
+/// extension. Half a day means a pet needs two auto-feeds a day to stay alive,
+/// which at the `auto_feed` price of 0.015 ACR is 0.03 ACR/day per pet — well
+/// inside the 0..1 ACR/day the AI Lab slider offers.
+pub const AUTO_FEED_SECONDS: u64 = 12 * 60 * 60;
+
 /// A pet cannot attack again until this has passed.
 pub const ATTACK_COOLDOWN_SECONDS: u64 = 60 * 60;
 /// A pet cannot be attacked again until this has passed.

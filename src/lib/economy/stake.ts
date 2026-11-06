@@ -31,6 +31,8 @@ export type StakeAccount = {
   pending_credits: string;
   /** Auto-feed budget per day, in micro-credits. 0 = off. */
   auto_feed_budget: string;
+  /** Of that budget, what auto-feed has already spent today. */
+  auto_feed_spent: string;
   last_claim_at: string;
   /** Unused items, as [item_id, count]. */
   items: Array<[number, number]>;
@@ -110,6 +112,7 @@ const EMPTY_ACCOUNT = (accountId: string): StakeAccount => ({
   credit_balance: '0',
   pending_credits: '0',
   auto_feed_budget: '0',
+  auto_feed_spent: '0',
   last_claim_at: '0',
   items: []
 });

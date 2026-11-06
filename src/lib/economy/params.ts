@@ -183,6 +183,37 @@ export const SINKS: Record<CreditAction, SinkSpec> = {
  */
 export const NEAR_PER_CREDIT = 0.5;
 
+// ── Auto-feed ────────────────────────────────────────────────────────────────
+
+/**
+ * How long one auto-feed window lasts. The allowance is daily, and the window
+ * is a fixed UTC day — `block_timestamp / AUTO_FEED_WINDOW_SECONDS` on chain —
+ * so it resets at 00:00 UTC rather than 24 hours after a player's last feed.
+ *
+ * Keep in step with `AUTO_FEED_WINDOW_SECONDS` in
+ * contracts/pet-stake/src/types.rs.
+ */
+export const AUTO_FEED_WINDOW_SECONDS = SECONDS_PER_DAY;
+
+/**
+ * How much life one auto-feed buys — half a full meal, so two a day keep a pet
+ * alive. At the 0.015 ACR price that is 0.03 ACR/day per pet, well inside the
+ * 0..1 ACR/day the AI Lab slider offers.
+ *
+ * Keep in step with `AUTO_FEED_SECONDS` in contracts/game/src/types.rs.
+ */
+export const AUTO_FEED_EXTENDS_SECONDS = 12 * 3600;
+
+/**
+ * How close to starving a pet has to be before the cron feeds it.
+ *
+ * Not zero, and not "always": feeding a pet that has 20 hours left spends the
+ * player's budget to bank food they did not need, and the game contract caps
+ * banked food at 7 days anyway. Six hours leaves a cron that runs hourly five
+ * missed runs of slack before a pet actually dies.
+ */
+export const AUTO_FEED_WHEN_UNDER_SECONDS = 6 * 3600;
+
 /**
  * A one-off sponsored grant so a new player can try AI Feed before owning a
  * pet. Deliberately once per account and small: a daily 0.05 ACR faucet is

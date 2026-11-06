@@ -458,6 +458,70 @@ impl Game {
         }
     }
 
+    /// Feed a pet on behalf of its owner, paid for in AI credits.
+    ///
+    /// Auto-feed (issue #8) debits the player's credit balance on `pet-stake`,
+    /// but the starving deadline lives here — and every other way of moving it
+    /// (`buy_item`) is `assert_pet_owner` plus an attached NEAR deposit, which a
+    /// server key signing for an absent player cannot satisfy. So this is the
+    /// one caller-gated feeding door, shaped exactly like `award_xp`: only the
+    /// staking contract or this contract's owner may open it.
+    ///
+    /// `owner_id` is checked against the pet rather than trusted. `pet-stake`
+    /// charges *that account's* credits, so if the two could disagree a
+    /// compromised oracle could spend one player's balance on another player's
+    /// pet. Returning `false` instead of panicking is deliberate: the caller
+    /// refunds on a false, and a panic across a cross-contract boundary loses
+    /// which of the two reasons it was.
+    ///
+    /// No XP. Auto-feed runs no inference, so there is no taste multiplier to
+    /// grade the meal — it keeps the pet alive while the player is away rather
+    /// than levelling it in their absence.
+    pub fn feed_from_stake(&mut self, pet_id: u64, owner_id: AccountId) -> bool {
+        require!(
+            env::predecessor_account_id() == self.stake_contract
+                || env::predecessor_account_id() == self.owner_id,
+            "Only the staking contract can feed a pet for its owner"
+        );
+
+        let Some(mut pet) = self.pets.get(&pet_id) else {
+            env::log_str("No such pet");
+            return false;
+        };
+        if pet.owner_id != owner_id {
+            env::log_str("That pet belongs to someone else");
+            return false;
+        }
+
+        let now = env::block_timestamp();
+        // Auto-feed keeps a pet alive; it does not resurrect one. Reviving is a
+        // separate, deliberately expensive sink, and a player who has lost a pet
+        // should be told rather than quietly charged for feeding a corpse.
+        if !pet.is_alive(now) {
+            env::log_str("This pet has starved — it needs a revival item");
+            return false;
+        }
+
+        // Same banked-food ceiling as the shop, so auto-feed cannot stockpile
+        // more life than a paying player can.
+        let extended = pet.starves_at + AUTO_FEED_SECONDS * NANOS_PER_SECOND;
+        let ceiling = now + MAX_STARVE_SECONDS * NANOS_PER_SECOND;
+        pet.starves_at = extended.min(ceiling);
+        self.pets.insert(&pet_id, &pet);
+
+        self.log_event(
+            "pet_auto_fed",
+            json!({
+                "pet_id": pet_id,
+                "owner_id": owner_id,
+                "seconds": AUTO_FEED_SECONDS,
+                "starves_at": U64(pet.starves_at),
+            }),
+        );
+
+        true
+    }
+
     /// Advance a pet to its next evolution phase. Raises staking weight, and
     /// therefore both income and drop rate, permanently.
     pub fn evolve(&mut self, pet_id: u64) {
@@ -1336,6 +1400,99 @@ mod tests {
         let after = contract.get_pet(pet_id).unwrap();
         assert_eq!(after.starves_at.0, before + 3 * 3_600 * NANOS_PER_SECOND);
         assert_eq!(after.xp, 30);
+    }
+
+    // ── Auto-feed, paid for in credits on pet-stake ──────────────────────────
+
+    #[test]
+    fn the_staking_contract_can_feed_a_pet_for_its_owner() {
+        let mut contract = deploy();
+        let pet_id = mint(&mut contract, alice(), 100);
+        let before = contract.get_pet(pet_id).unwrap().starves_at.0;
+
+        testing_env!(ctx(stake(), 100, 0).build());
+        assert!(contract.feed_from_stake(pet_id, alice()));
+
+        let after = contract.get_pet(pet_id).unwrap();
+        assert_eq!(
+            after.starves_at.0,
+            before + AUTO_FEED_SECONDS * NANOS_PER_SECOND
+        );
+        assert_eq!(after.xp, 0, "auto-feed runs no inference, so it grants no XP");
+        assert_eq!(after.level, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only the staking contract can feed a pet")]
+    fn players_cannot_feed_a_pet_for_free() {
+        let mut contract = deploy();
+        let pet_id = mint(&mut contract, alice(), 100);
+
+        testing_env!(ctx(alice(), 100, 0).build());
+        contract.feed_from_stake(pet_id, alice());
+    }
+
+    /// The check that makes `auto_feed` safe to charge for. `pet-stake` debits
+    /// the account it is given, so if the pet could belong to someone else a
+    /// compromised oracle could spend one player's budget feeding another's pet.
+    #[test]
+    fn feeding_refuses_when_the_pet_belongs_to_someone_else() {
+        let mut contract = deploy();
+        let pet_id = mint(&mut contract, alice(), 100);
+        let before = contract.get_pet(pet_id).unwrap().starves_at.0;
+
+        testing_env!(ctx(stake(), 100, 0).build());
+        assert!(!contract.feed_from_stake(pet_id, bob()));
+        assert_eq!(
+            contract.get_pet(pet_id).unwrap().starves_at.0,
+            before,
+            "and the deadline does not move"
+        );
+    }
+
+    #[test]
+    fn feeding_refuses_a_pet_that_does_not_exist() {
+        let mut contract = deploy();
+        testing_env!(ctx(stake(), 100, 0).build());
+        assert!(!contract.feed_from_stake(404, alice()));
+    }
+
+    /// Auto-feed keeps a pet alive; it does not resurrect one. The refusal is
+    /// what `pet-stake::on_auto_fed` refunds against.
+    #[test]
+    fn feeding_refuses_a_pet_that_has_already_starved() {
+        let mut contract = deploy();
+        let pet_id = mint(&mut contract, alice(), 100);
+
+        let dead = 100 + STARVE_SECONDS + 1;
+        testing_env!(ctx(stake(), dead, 0).build());
+        assert!(!contract.feed_from_stake(pet_id, alice()));
+        assert!(!contract.is_pet_alive(pet_id));
+    }
+
+    #[test]
+    fn auto_feeding_respects_the_same_banked_food_ceiling() {
+        let mut contract = deploy();
+        let pet_id = mint(&mut contract, alice(), 100);
+
+        for _ in 0..30 {
+            testing_env!(ctx(stake(), 100, 0).build());
+            contract.feed_from_stake(pet_id, alice());
+        }
+
+        let pet = contract.get_pet(pet_id).unwrap();
+        assert_eq!(
+            pet.starves_at.0,
+            (100 + MAX_STARVE_SECONDS) * NANOS_PER_SECOND,
+            "a cron must not be able to bank more life than a paying player"
+        );
+    }
+
+    /// Two auto-feeds a day is what keeps a pet alive, which is the number the
+    /// 0.015 ACR price and the AI Lab slider's range were set against.
+    #[test]
+    fn two_auto_feeds_cover_a_day() {
+        assert_eq!(AUTO_FEED_SECONDS * 2, STARVE_SECONDS);
     }
 
     #[test]

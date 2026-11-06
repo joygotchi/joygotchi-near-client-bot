@@ -159,8 +159,21 @@ export const variables = defineEnvVars({
     schema: secretKey(),
     description:
       'Secret key for NEAR_ORACLE_ACCOUNT_ID, as `ed25519:<base58>`. Server-only. ' +
-      'Must be a *function-call* access key limited to `award_feed_xp` on the ' +
-      'staking contract — the chain is what enforces that, so a leak of this ' +
-      'key can award capped XP and nothing else. Never a full-access key.'
+      'Must be a *function-call* access key limited to `award_feed_xp,auto_feed` ' +
+      'on the staking contract — the chain is what enforces that, so a leak of ' +
+      'this key can award capped XP and feed a pet inside its own owner\'s daily ' +
+      'budget, and nothing else. Never a full-access key.'
+  },
+
+  // ── Private: the auto-feed cron ─────────────────────────────────────────────
+  CRON_SECRET: {
+    schema: optional(),
+    description:
+      'Shared secret the auto-feed cron must present as `Authorization: Bearer ' +
+      '<secret>`. Vercel Cron sends this header automatically from a project ' +
+      'environment variable of the same name. Leave it empty and ' +
+      '/api/cron/auto-feed refuses every request: the route spends players\' ' +
+      'credits, so an open endpoint is a way to drain every budget on the ' +
+      'deployment one call at a time.'
   }
 });
