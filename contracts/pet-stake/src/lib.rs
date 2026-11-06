@@ -179,7 +179,6 @@ impl PetStake {
             ("evolve", 500_000),
             ("craft_item", 20_000),
             ("chat", 1_000),
-            ("revive", 1_000_000),
             ("auto_feed", 15_000),
         ] {
             contract.prices.insert(&action.to_string(), &credits);
@@ -1007,6 +1006,28 @@ impl PetStake {
         self.prices.insert(&action, &credits.0);
     }
 
+    /// Retire a credit sink, so `spend_credits` refuses it outright.
+    ///
+    /// `set_action_price(action, 0)` is not the same thing and not a
+    /// substitute: a price of zero still passes every check in
+    /// `spend_credits`, so the action stays spendable and merely becomes free.
+    /// Deleting the key is what makes it "Unknown action" again.
+    ///
+    /// This exists because `revive` was priced at 1 credit and advertised in
+    /// the client, and no contract ever implemented it — a sink that debited a
+    /// balance and did nothing. Removing it from `new`'s seed fixes fresh
+    /// deployments only; the price lives in contract *state*, so a deployment
+    /// already running needs this call to forget it.
+    pub fn remove_action_price(&mut self, action: String) -> bool {
+        self.assert_owner();
+        let existed = self.prices.remove(&action).is_some();
+        self.log_event(
+            "action_price_removed",
+            json!({ "action": action, "existed": existed }),
+        );
+        existed
+    }
+
     pub fn set_item_price(&mut self, item_id: u16, credits: U128) {
         self.assert_owner();
         self.item_prices.insert(&item_id, &credits.0);
@@ -1675,6 +1696,87 @@ mod tests {
         let mut contract = deploy();
         testing_env!(ctx(alice(), 10).build());
         contract.admin_rebuild_account(alice());
+    }
+
+    // ── Credit sinks ─────────────────────────────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "Unknown action")]
+    fn revive_is_not_a_sink() {
+        // It was priced at 1 credit and listed in the client, and no contract
+        // ever implemented it: `spend_credits("revive")` debited a balance and
+        // did nothing. Reviving a starved pet is the game contract's Holy
+        // Water, bought with NEAR, and always was.
+        let mut contract = deploy();
+        testing_env!(ctx(owner(), 0).build());
+        contract.admin_set_pet(1, alice(), attrs(0, 0, 1, Rarity::Common));
+
+        testing_env!(ctx(alice(), EPOCH_SECONDS).build());
+        contract.claim_credits();
+        contract.spend_credits("revive".to_string(), Some(1), U128(ONE_CREDIT));
+    }
+
+    #[test]
+    fn the_owner_can_retire_a_sink_from_a_running_deployment() {
+        let mut contract = deploy();
+        testing_env!(ctx(owner(), 0).build());
+        contract.admin_set_pet(1, alice(), attrs(0, 0, 1, Rarity::Common));
+
+        // A deployment that predates this still has the price in state, so
+        // stand one back up the only way state can be written.
+        contract.set_action_price("revive".to_string(), U128(ONE_CREDIT));
+
+        testing_env!(ctx(alice(), EPOCH_SECONDS).build());
+        contract.claim_credits();
+        // Spendable again, which is the problem this call is for.
+        contract.spend_credits("revive".to_string(), Some(1), U128(ONE_CREDIT));
+
+        testing_env!(ctx(owner(), EPOCH_SECONDS).build());
+        assert!(contract.remove_action_price("revive".to_string()));
+        // Idempotent: nothing left to remove the second time.
+        assert!(!contract.remove_action_price("revive".to_string()));
+        assert!(contract.get_action_price("revive".to_string()).is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "Unknown action")]
+    fn a_retired_sink_cannot_be_spent() {
+        let mut contract = deploy();
+        testing_env!(ctx(owner(), 0).build());
+        contract.admin_set_pet(1, alice(), attrs(0, 0, 1, Rarity::Common));
+        contract.set_action_price("revive".to_string(), U128(ONE_CREDIT));
+        contract.remove_action_price("revive".to_string());
+
+        testing_env!(ctx(alice(), EPOCH_SECONDS).build());
+        contract.claim_credits();
+        contract.spend_credits("revive".to_string(), Some(1), U128(ONE_CREDIT));
+    }
+
+    #[test]
+    fn a_price_of_zero_is_not_how_you_retire_a_sink() {
+        // The trap this method exists to avoid: zero passes `amount >= price`
+        // and `balance >= price`, so the action stays live and merely becomes
+        // free. Pinned so nobody "simplifies" `remove_action_price` away.
+        let mut contract = deploy();
+        testing_env!(ctx(owner(), 0).build());
+        contract.admin_set_pet(1, alice(), attrs(0, 0, 1, Rarity::Common));
+        contract.set_action_price("revive".to_string(), U128(0));
+
+        testing_env!(ctx(alice(), EPOCH_SECONDS).build());
+        assert_eq!(
+            contract
+                .spend_credits("revive".to_string(), Some(1), U128(0))
+                .0,
+            0
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Only the owner can call this")]
+    fn players_cannot_retire_a_sink() {
+        let mut contract = deploy();
+        testing_env!(ctx(alice(), 10).build());
+        contract.remove_action_price("ai_feed".to_string());
     }
 
     // ── Feed XP ──────────────────────────────────────────────────────────────
