@@ -29,6 +29,11 @@ jobs:
       # Types, a11y and unused props. Runs `svelte-kit sync` itself.
       - run: pnpm check
 
+      # The client's own logic: amounts, pet state, economy formulas. The three
+      # bugs that got through to testnet this week all lived here, not in the
+      # contracts.
+      - run: pnpm test
+
       - run: pnpm build
 
   contracts:

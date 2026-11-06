@@ -7,10 +7,20 @@ import { getActiveWallet, wallet } from './wallet.svelte';
  * returns the full structure; typing just this keeps `@near-js/*` out of the
  * dependency tree.
  */
+export type ExecutionStatus = {
+  SuccessValue?: string;
+  SuccessReceiptId?: string;
+  Failure?: {
+    ActionError?: {
+      kind?: { FunctionCallError?: { ExecutionError?: string } } | Record<string, unknown>;
+    };
+  };
+};
+
 export type TxOutcome = {
   transaction: { hash: string; signer_id: string; receiver_id: string };
-  status: Record<string, unknown>;
-  receipts_outcome?: Array<{ outcome: { logs: string[] } }>;
+  status: ExecutionStatus & Record<string, unknown>;
+  receipts_outcome?: Array<{ outcome: { logs: string[]; status?: ExecutionStatus } }>;
 };
 
 export class WalletNotConnectedError extends Error {
@@ -18,6 +28,50 @@ export class WalletNotConnectedError extends Error {
     super('Connect a wallet first');
     this.name = 'WalletNotConnectedError';
   }
+}
+
+/** A call that the chain accepted, but whose work failed further down. */
+export class ReceiptFailedError extends Error {
+  constructor(
+    message: string,
+    readonly txHash: string
+  ) {
+    super(message);
+    this.name = 'ReceiptFailedError';
+  }
+}
+
+function panicMessage(status: ExecutionStatus | undefined): string | null {
+  const kind = status?.Failure?.ActionError?.kind;
+  if (!kind) return null;
+  const execution = (kind as { FunctionCallError?: { ExecutionError?: string } }).FunctionCallError
+    ?.ExecutionError;
+  if (typeof execution === 'string') {
+    // "Smart contract panicked: <what the contract actually said>"
+    return execution.replace(/^Smart contract panicked:\s*/, '');
+  }
+  return Object.keys(kind)[0] ?? 'the call failed';
+}
+
+/**
+ * Throw if any receipt in the transaction failed.
+ *
+ * A NEAR transaction reports success as soon as its first receipt is accepted,
+ * so everything a contract does in a cross-contract callback fails *silently*
+ * from the client's point of view. On testnet, staking somebody else's pet came
+ * back as a clean success: `stake_pet` only schedules the call, and the
+ * ownership check lives in the callback. The UI said "staked".
+ *
+ * Checked everywhere rather than at call sites, because the calls that cross
+ * contracts are not the ones that look like they do.
+ */
+export function assertReceiptsSucceeded(outcome: TxOutcome): TxOutcome {
+  const statuses = [outcome.status, ...(outcome.receipts_outcome ?? []).map((r) => r.outcome.status)];
+  for (const status of statuses) {
+    const message = panicMessage(status);
+    if (message) throw new ReceiptFailedError(message, outcome.transaction?.hash ?? '');
+  }
+  return outcome;
 }
 
 export type FunctionCall = {
@@ -51,11 +105,12 @@ export async function callFunction(
   const active = await getActiveWallet();
   if (!active || !wallet.accountId) throw new WalletNotConnectedError();
 
-  return active.signAndSendTransaction({
+  const outcome = await active.signAndSendTransaction({
     signerId: wallet.accountId,
     receiverId: contractId,
     actions: [toAction({ methodName, args, ...options })]
   });
+  return assertReceiptsSucceeded(outcome);
 }
 
 /** Sign and send several calls to the same contract as one transaction. */
@@ -66,11 +121,12 @@ export async function callFunctions(
   const active = await getActiveWallet();
   if (!active || !wallet.accountId) throw new WalletNotConnectedError();
 
-  return active.signAndSendTransaction({
+  const outcome = await active.signAndSendTransaction({
     signerId: wallet.accountId,
     receiverId: contractId,
     actions: calls.map(toAction)
   });
+  return assertReceiptsSucceeded(outcome);
 }
 
 /** Sign and send a call, then decode its return value. */
@@ -82,6 +138,22 @@ export async function callAndDecode<T>(
 ): Promise<T | null> {
   const outcome = await callFunction(contractId, methodName, args, options);
   return decodeResult<T>(outcome);
+}
+
+/**
+ * Read the log line a callback left when it reported failure by *returning*
+ * rather than panicking.
+ *
+ * `on_pet_attrs` logs why and returns `false`, which keeps the pet's state
+ * clean but is indistinguishable from success in the transaction status.
+ */
+export function failureLog(outcome: TxOutcome, patterns: string[]): string | null {
+  for (const receipt of outcome.receipts_outcome ?? []) {
+    for (const line of receipt.outcome.logs) {
+      if (patterns.some((p) => line.includes(p))) return line;
+    }
+  }
+  return null;
 }
 
 /**
@@ -115,12 +187,14 @@ export async function callAcrossContracts(
   const active = await getActiveWallet();
   if (!active || !wallet.accountId) throw new WalletNotConnectedError();
 
-  return active.signAndSendTransactions({
+  const outcomes = await active.signAndSendTransactions({
     transactions: transactions.map((tx) => ({
       receiverId: tx.receiverId,
       actions: tx.calls.map(toAction)
     }))
   });
+  outcomes.forEach(assertReceiptsSucceeded);
+  return outcomes;
 }
 
 /** NEP-141 `storage_deposit`, needed once before an account can hold a token. */

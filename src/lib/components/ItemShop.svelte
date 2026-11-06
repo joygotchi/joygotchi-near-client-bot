@@ -21,7 +21,12 @@
     return () => clearInterval(timer);
   });
 
-  const credits = $derived(player.credits + liveCredits(now));
+  // Two numbers, not one: `player.credits` is the spendable balance, and
+  // `liveCredits` is what the stream has earned but not yet claimed. The
+  // contract only spends the first, so the display adds them while the action
+  // keeps them apart and claims when it has to.
+  const claimable = $derived(liveCredits(now));
+  const credits = $derived(player.credits + claimable);
   const feedCost = SINKS.ai_feed.credits;
   const petInfo = $derived(pet ? petState(pet.pet_id) : null);
   const lensFeeds = $derived(petInfo?.lens_feeds_left ?? 0);
@@ -33,7 +38,8 @@
 
     try {
       const result = await performAiAction<AiFeedResult>('ai_feed', pet, {
-        creditBalance: credits
+        creditBalance: player.credits,
+        pendingCredits: claimable
       });
       lastMeal = result;
       notify('success');

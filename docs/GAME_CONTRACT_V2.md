@@ -398,38 +398,44 @@ Deployed and exercised on testnet with
 
 | | |
 |---|---|
-| game | `jg-game-72362.testnet` |
-| pet-stake | `jg-stake-72362.testnet` |
-| mint-router | `jg-mint-72362.testnet` |
+| game | `jg-game-5656.testnet` |
+| pet-stake | `jg-stake-5656.testnet` |
+| mint-router | `jg-mint-5656.testnet` |
+
+A fresh set of accounts, because the `Game` struct gained `listings`,
+`market_fee_bps` and `treasury` — see the note on Borsh below.
 
 | Criterion | Result |
 |---|---|
 | `stake_pet` succeeds without `admin_set_pet`, refusing a pet the caller does not own | **pass** — `get_pet_attrs` resolved across contracts, weight 100 |
-| A staked pet cannot be transferred | **pass** — `nft_transfer` reverts |
+| A staked pet cannot be transferred or listed | **pass** — with a readable error |
 | Attacking settles through `report_battle` and the callback applies the damage | **pass** |
-| A Star Charm is consumed and the star survives | not run — needs a pet with stars |
-| Levelling a staked pet changes its credit rate | not run |
-| A starved pet reads as dying from a derived status | **pass** in unit tests; not reproduced live (no pet has starved yet) |
+| A pet sells for NEAR, fee to the treasury | **pass** — 1 NEAR, 0.025 fee |
+| A star is earned after three wins | partial — the streak advances correctly; three wins need three hours of attack cooldown |
+| Levelling a staked pet changes its credit rate | **pass**, after a fix — see the full sweep below |
 | Paying ZEC through 1Click produces a pet | **not run** — needs a 1Click partner JWT |
-| The countdown shows a plausible time | **pass** — `seconds_until_starving` 86,349 on a fresh pet |
 
 ### The live run, in order
 
 ```
-create_pet            → pet_minted      pet 1, common, to jg-p2
+create_pet ×2         → pets 1 and 2, to two different owners
 stake_pet             → get_pet_attrs across contracts
-                      → pet_staked      weight 100
-                      → set_locked      back on the game contract
-nft_transfer (staked) → reverts
-claim_credits         → credits_claimed 111,111 micro-credits
+                      → pet_staked  weight 100
+                      → set_locked  back on the game contract
+list_pet (staked)     → "This pet is at work in the AI Lab — unstake it before selling"
 unstake_pet           → pet_unstaked + set_locked(false)
-attack                → battle_rolled   attacker 111 vs defender 86
-                      → report_battle   transferred 0, rake 0
-                      → battle_settled   winner +25 XP, loser wounded 6h
+attack                → battle_rolled   attacker 93 vs defender 95
+                      → the ATTACKER LOST
+                      → battle_settled  defender +25 XP, win_streak 1, wins_to_next_star 2
+                      → attacker wounded 6h, not attackable
+list_pet              → pet_listed      1 NEAR
+buy_pet               → pet_sold        fee 0.025 NEAR (2.5%)
+                      → ownership moved, listing cleared
 ```
 
-`transferred: 0` is correct, not a failure: the loser had no credits, and the
-contract takes whatever they can cover rather than refusing the fight.
+The attacker losing is worth noting rather than retrying: the ±15% band on an
+otherwise even matchup did exactly what it is for. Attacking is not a free win,
+which is the point of putting a wager behind it.
 
 ### One real problem, found only by deploying — now fixed
 
@@ -467,12 +473,171 @@ the game contract — which is its own evidence that the pass had been missing.
 `build.sh` now goes through `cargo near build` and refuses to run with
 cargo-near older than 0.22.
 
-### Adding a field to `Pet` breaks existing state
+### Changing a stored struct breaks existing state
 
-Worth recording before mainnet: `win_streak` was added to `Pet` in the same
-round, which changes the Borsh layout. The two pets already on testnet became
-unreadable, and a fresh one had to be minted to finish the checks above.
+This has now bitten twice. `win_streak` on `Pet` made the pets already on
+testnet unreadable; adding `listings`, `market_fee_bps` and `treasury` to the
+contract struct itself meant the whole deployment had to move to fresh
+accounts.
 
-On mainnet that is not acceptable. Any later change to `Pet` needs an
-`#[init(ignore_state)]` migration that reads the old layout, which means
-keeping the previous struct definition around to deserialise with.
+On testnet that costs a faucet call. On mainnet it is not an option, and it
+applies to any stored struct, not only `Pet`. Either freeze the layouts before
+the mainnet deploy, or accept that the first post-launch field addition is a
+migration exercise: an `#[init(ignore_state)]` entry point that keeps the
+previous struct definition around to deserialise with.
+
+## 10 · The full testnet sweep
+
+A second pass over the deployed contracts, this time every path and every
+guard rather than the happy one. 44 calls against the three live contracts.
+
+Signers: `jg-p2-72362.testnet` and `jg-p3-72362.testnet` as players,
+`jg-game-5656.testnet` as the game owner. Views go through FastNEAR;
+`archival-rpc.testnet.near.org`, the near-cli default, rate-limits a run this
+size within a minute.
+
+### What passed
+
+```
+mint            create_pet 2 NEAR          → pet 3, common blackdragon
+                underpaid                  → "Attach at least the mint price"
+                mint revenue stays on the game contract until `sweep`
+stake           stake_pet (1 yocto)        → weight 100, locked on the game contract
+                a pet already staked       → "Pet is already staked"
+                list a staked pet          → "…at work in the AI Lab — unstake it before selling"
+credits         claim_faucet               → 10,000 once
+                claim_faucet again         → "You have already used the faucet"
+                claim_mining               → 5,000, then "Mining is still on cooldown"
+                claim_credits              → 32,066, matching the view's projection exactly
+                spend over balance         → "Not enough credits — claim or convert some first"
+                ai_feed                    → credit_spent, lens_applied false
+items           buy_credit_item 103        → lens into inventory
+                use_item                   → lens_feeds_left 10
+                ai_feed with the lens      → lens_applied TRUE, 10 → 9
+                list_item 15,000           → listing 1
+                buy_listing (not owner)    → seller +14,250, buyer −15,000, rake 750 to reserve
+                cancel someone else's      → refused
+battle          attack                     → 118 vs 111, winner pet 3
+                                           → 9,500 transferred, 500 rake, loser wounded 6h
+                                           → win_streak 1, wins_to_next_star 2
+                immediate re-attack        → cooldown holds
+                pet vs itself / not owner  → both refused
+pet market      list_pet 1 NEAR            → pet_listed
+                buy_pet 0.5 NEAR           → refused
+                buy_pet 1 NEAR             → seller +0.975, treasury +0.025, ownership moved
+mint-router     wNEAR + mint_pet msg       → pet 4 to the payer, 14.0 Tgas
+                wNEAR + buy_credits msg    → 0.5 wNEAR → 1.000000 credit, debited from the reserve
+                wNEAR + nonsense msg       → "Unrecognised payment message — refunding"
+guards          grant_credits as a player  → "Only the mint router can grant credits"
+                create_pet_for             → "Only the mint router can mint for another account"
+                set_locked                 → "Only the staking contract can lock a pet"
+                report_battle              → "Only the game contract can settle battles"
+                award_xp                   → "Only the staking contract can award XP"
+                sweep / set_paused / set_epoch_budget → "Only the owner can call this"
+```
+
+Every guard holds and every error message arrives readable, which is the
+cargo-near fix above still doing its job.
+
+### The pool was double-counting weight
+
+Found by levelling a staked pet — the one row the first run had left unticked.
+
+`sync_pet` re-reads a pet after it levels up and lands in `on_pet_attrs`, the
+same callback a first stake uses, which called `internal_stake` — and
+`internal_stake` *added* the weight:
+
+```
+stake pet 3                   account 100,  pool 200   (pet 1 + pet 3)
+award_xp → level 1 → sync     account 205,  pool 305   ← 100 + 105, for one pet
+unstake pet 3                 account 100,  pool 200   ← subtracted only the newer 105
+```
+
+The account kept 100 units of weight with nothing staked, and the pool kept
+paying out against it: a share of every epoch going to a player with no pet at
+work, diluting everyone who did have one. Every level-up and every evolve added
+another pet's worth. `account.staked` also listed the pet twice.
+
+All 37 pet-stake tests passed throughout, because every one of them staked
+through `admin_set_pet` — which did unwind the old record by hand. Nothing
+exercised the callback that production actually uses.
+
+The fix replaces rather than adds: `drop_stake_record` takes the old weight
+back out of both the account and the pool before the new one goes in, and
+`admin_set_pet` now leans on it instead of repeating it. A re-weigh also stops
+reporting itself as a new stake — both emitted `pet_staked`, so an indexer
+counted one pet as two.
+
+Re-run live after redeploying:
+
+```
+stake pet 4                   pool 200 → 300
+award_xp → level 1 → sync     pool 300 → 305   pet_resynced weight 105
+unstake pet 4                 pool 305 → 200   account back to pet 1 alone
+```
+
+Three Rust tests pin it, and two of them fail on the old code.
+
+### And nothing could repair the damage
+
+The corrupted account was the second finding: no method on the contract could
+take phantom weight off. The only repair was a redeploy with fresh state, which
+costs every player their stake.
+
+`admin_rebuild_account` is the safety valve — owner-only, recomputes an
+account's weight and `staked` list from the `pets` records, which are the
+authority, and keeps credits already earned. Used on testnet to clear the 100
+phantom units left by the pre-fix round:
+
+```
+account_rebuilt  jg-p2-72362.testnet  weight 0
+pool             total_weight 100     ← one staked pet, 100 weight. Correct.
+```
+
+### Feed XP is never written on chain
+
+`spend_credits("ai_feed")` debits credits and emits `credit_spent`.
+`/api/ai/chat` verifies that receipt, runs the inference, computes
+`xpGained` — and returns it to the browser. Nothing calls `award_xp`.
+
+`award_xp` accepts only the staking contract or the game owner, and no code in
+this repository calls it from either. So on the live chain a pet's XP stays 0
+however much it is fed: no levels, no weight growth, no evolve, no star gates.
+Confirmed by feeding pet 3 twice and reading `xp: 0`, then levelling it by
+hand as the owner, which worked.
+
+This is a missing piece rather than a bug: the taste multiplier is only known
+after inference, so the award cannot happen inside `spend_credits`, and the
+server has no key to call anything. It needs the delegated signer that issue #8
+is already about — `pet-stake` gaining an oracle-gated `award_feed_xp` that
+forwards to the game contract, with the server holding that key.
+
+### Smaller things
+
+- **Pending credits are not spendable.** `harvest` folds earnings into
+  `pending`; only `claim_credits` moves `pending` into `credit_balance`, and
+  `spend_credits`, `buy_credit_item` and `buy_listing` all check the balance.
+  A player with 0 balance and 31,750 pending is told to claim first. The
+  message says so, but the client should batch the claim into the same
+  transaction rather than make them find the button.
+- **`battle_settled` is emitted twice**, once by each contract, under the same
+  event name. An indexer counting battles counts double.
+- **Views lag the transaction.** A read immediately after a call returns
+  pre-call state at `finality: final`; the lens looked like it had done nothing
+  until the block settled. Worth knowing before reporting a bug.
+
+### The client called a failed action a success
+
+Not a contract problem, but the sweep is what exposed it: staking a pet
+belonging to somebody else came back as a **clean success**.
+
+`stake_pet` only schedules the cross-contract read; the ownership check is in
+the callback, which logs and returns `false`. A NEAR transaction reports success
+as soon as its first receipt is accepted, so nothing in
+`src/lib/near/tx.ts` saw a failure — not for this, and not for a receipt that
+panics outright.
+
+Both halves are closed now: `assertReceiptsSucceeded` walks every receipt and
+throws the contract's own message, wired into every signed call, and `stakePet`
+additionally reads the log line a callback leaves when it refuses by returning
+rather than panicking.

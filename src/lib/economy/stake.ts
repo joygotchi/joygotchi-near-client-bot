@@ -1,7 +1,13 @@
 import { GAS, MINT_ROUTER_CONTRACT, STAKE_CONTRACT, WNEAR_CONTRACT } from '#lib/config';
 import { parseAmount } from '#lib/near/amount';
 import { viewFunction } from '#lib/near/rpc';
-import { callAcrossContracts, callFunction, callFunctions } from '#lib/near/tx';
+import {
+  ReceiptFailedError,
+  callAcrossContracts,
+  callFunction,
+  callFunctions,
+  failureLog
+} from '#lib/near/tx';
 import {
   CREDIT_DECIMALS,
   CREDIT_ITEMS,
@@ -223,9 +229,30 @@ export async function getCreditItemPrices(
 
 // ── Calls ────────────────────────────────────────────────────────────────────
 
-/** Put a pet to work in the AI lab. It stops being able to battle. */
-export const stakePet = (petId: number) =>
-  callFunction(STAKE_CONTRACT, 'stake_pet', { pet_id: petId }, { gas: GAS.heavy, deposit: '1' });
+/**
+ * Put a pet to work in the AI lab. It stops being able to battle.
+ *
+ * The ownership check happens in a callback on the contract, which logs and
+ * returns `false` instead of panicking — so the transaction succeeds either
+ * way. Staking a pet somebody else owns looked like a clean success on testnet
+ * until the pool was read back.
+ */
+export async function stakePet(petId: number) {
+  const outcome = await callFunction(
+    STAKE_CONTRACT,
+    'stake_pet',
+    { pet_id: petId },
+    { gas: GAS.heavy, deposit: '1' }
+  );
+
+  const refused = failureLog(outcome, [
+    'That pet belongs to someone else',
+    'Could not read the pet from the game contract'
+  ]);
+  if (refused) throw new ReceiptFailedError(refused, outcome.transaction.hash);
+
+  return outcome;
+}
 
 export const unstakePet = (petId: number) =>
   callFunction(STAKE_CONTRACT, 'unstake_pet', { pet_id: petId }, { gas: GAS.heavy, deposit: '1' });
@@ -240,16 +267,33 @@ export const claimCredits = () =>
  * any inference, so credits can never be spent twice.
  */
 export const spendCredits = (action: CreditAction, petId: number | null = null) =>
-  callFunction(
-    STAKE_CONTRACT,
-    'spend_credits',
-    {
-      action,
-      pet_id: petId,
-      amount: parseAmount(SINKS[action].credits.toString(), CREDIT_DECIMALS)
-    },
-    { gas: GAS.heavy }
-  );
+  callFunction(STAKE_CONTRACT, 'spend_credits', spendArgs(action, petId), { gas: GAS.heavy });
+
+function spendArgs(action: CreditAction, petId: number | null) {
+  return {
+    action,
+    pet_id: petId,
+    amount: parseAmount(SINKS[action].credits.toString(), CREDIT_DECIMALS)
+  };
+}
+
+/**
+ * Claim and spend in one transaction.
+ *
+ * `harvest` folds earnings into `pending_credits`, and only `claim_credits`
+ * moves those into the `credit_balance` that every spend checks. A player who
+ * has been staking all week and has never pressed Claim has, as far as
+ * `spend_credits` is concerned, nothing. Two actions in one transaction spare
+ * them from finding out.
+ *
+ * Not unconditional: `claim_credits` panics with "Nothing to claim yet" when
+ * `pending` is empty, which would take the spend down with it.
+ */
+export const claimAndSpendCredits = (action: CreditAction, petId: number | null = null) =>
+  callFunctions(STAKE_CONTRACT, [
+    { methodName: 'claim_credits', args: {}, gas: GAS.call },
+    { methodName: 'spend_credits', args: spendArgs(action, petId), gas: GAS.call }
+  ]);
 
 export const setAutoFeedBudget = (creditsPerDay: number) =>
   callFunction(STAKE_CONTRACT, 'set_auto_feed_budget', {
