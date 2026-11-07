@@ -297,15 +297,18 @@ impl PetStake {
     /// Stake a pet. Reads the pet's owner and attributes from the game contract,
     /// so a player can only stake a pet they actually hold.
     ///
-    /// Attach 1 yoctoNEAR: this is a confirmation-worthy action, and requiring a
-    /// full-access signature stops a limited gameplay key from staking pets.
-    #[payable]
+    /// Takes no deposit, deliberately. It used to demand one yoctoNEAR, which
+    /// on NEAR means a full-access signature: a function-call access key can
+    /// never attach a deposit, whatever its allowance says. That put a browser
+    /// round trip in front of the action players take most, and what it bought
+    /// turned out to be small — neither this nor `unstake_pet` moves the NFT or
+    /// any balance, so the worst a stolen gameplay key can do here is put
+    /// somebody's pet in or out of the lab. A nuisance, not a theft.
+    ///
+    /// What still needs a real signature is anything that parts a player from
+    /// something: minting, buying, and the game contract's own transfers.
     pub fn stake_pet(&mut self, pet_id: u64) -> Promise {
         self.assert_running();
-        require!(
-            env::attached_deposit() >= NearToken::from_yoctonear(1),
-            "Attach 1 yoctoNEAR"
-        );
         require!(self.pets.get(&pet_id).is_none(), "Pet is already staked");
 
         let account_id = env::predecessor_account_id();
@@ -412,13 +415,9 @@ impl PetStake {
     }
 
     /// Take a pet out of the lab. Credits earned so far stay in `pending`.
-    #[payable]
+    ///
+    /// No deposit, for the reason given on `stake_pet`.
     pub fn unstake_pet(&mut self, pet_id: u64) {
-        require!(
-            env::attached_deposit() >= NearToken::from_yoctonear(1),
-            "Attach 1 yoctoNEAR"
-        );
-
         let account_id = env::predecessor_account_id();
         let pet = self.pets.get(&pet_id).expect("Pet is not staked");
         require!(pet.owner_id == account_id, "That pet belongs to someone else");
