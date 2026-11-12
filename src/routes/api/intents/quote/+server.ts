@@ -1,7 +1,7 @@
 import { error, json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { MINT_PRICE_WNEAR, MINT_ROUTER_CONTRACT, TREASURY_ACCOUNT } from '#lib/config';
-import { findPayAsset, SETTLEMENT_ASSET } from '#lib/intents/assets';
+import { findPayAsset, refundAddressError, SETTLEMENT_ASSET } from '#lib/intents/assets';
 import type {
   BuyCreditsMsg,
   MintRouterMsg,
@@ -23,7 +23,14 @@ const SLIPPAGE_BPS = 100;
 const DEADLINE_MINUTES = 45;
 
 const ACCOUNT_RE = /^(([a-z\d]+[-_])*[a-z\d]+\.)*([a-z\d]+[-_])*[a-z\d]+$/;
-const PET_CATEGORIES = ['blackdragon', 'greendragon'];
+/**
+ * The shape of a species id, as the game contract's `species_id_error` and
+ * the mint router check it. Which species exist is the contract's call: the
+ * router takes any registered one, so a fixed list of the two shipped dragons
+ * here refused every species a player had registered.
+ */
+const SPECIES_RE = /^[a-z0-9]{3,24}$/;
+const DEFAULT_SPECIES = 'blackdragon';
 
 function badRequest(message: string): never {
   error(400, message);
@@ -47,9 +54,8 @@ export const POST: RequestHandler = async ({ request, fetch }) => {
   const payAsset = findPayAsset(originAsset ?? '');
   if (!payAsset) badRequest('originAsset is not an accepted payment asset');
 
-  if (!refundTo || refundTo.trim().length < 8) {
-    badRequest(`refundTo must be a valid ${payAsset.chain} address`);
-  }
+  const refundProblem = refundAddressError(payAsset.blockchain, refundTo ?? '');
+  if (refundProblem) badRequest(refundProblem);
 
   if (!accountId || !ACCOUNT_RE.test(accountId) || accountId.length > 64) {
     badRequest('accountId must be a valid NEAR account id');
@@ -60,9 +66,9 @@ export const POST: RequestHandler = async ({ request, fetch }) => {
     badRequest('quantity must be between 1 and 10');
   }
 
-  const category = (body.petCategory ?? PET_CATEGORIES[0]).toLowerCase();
-  if (purpose === 'mint_pet' && !PET_CATEGORIES.includes(category)) {
-    badRequest(`petCategory must be one of: ${PET_CATEGORIES.join(', ')}`);
+  const category = (body.petCategory ?? DEFAULT_SPECIES).toLowerCase();
+  if (purpose === 'mint_pet' && !SPECIES_RE.test(category)) {
+    badRequest('petCategory must be a species id: 3 to 24 lowercase letters and digits');
   }
 
   const name = (body.petName ?? 'PET').slice(0, 32);

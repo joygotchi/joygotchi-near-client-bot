@@ -1,7 +1,14 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import { fetchPayTokens, requestQuote, watchSwap, type QuoteResult } from '#lib/intents/client';
-  import { PAY_ASSETS, type PayAsset } from '#lib/intents/assets';
+  import {
+    PAY_ASSETS,
+    PAY_CHAINS,
+    assetsOn,
+    findPayChain,
+    refundAddressError,
+    type PayAsset
+  } from '#lib/intents/assets';
   import type { PurchasePurpose } from '#lib/intents/purchase';
   import type { ExecutionStatus, TokenResponse } from '#lib/intents/types';
   import { STATUS_LABEL, TERMINAL_STATUSES } from '#lib/intents/types';
@@ -23,7 +30,17 @@
 
   let { purpose, summary, quantity = 1, petCategory, petName, onsettled }: Props = $props();
 
+  let chainId = $state(PAY_CHAINS[0].blockchain);
   let asset = $state<PayAsset>(PAY_ASSETS[0]);
+  const chain = $derived(findPayChain(chainId)!);
+  const chainAssets = $derived(assetsOn(chainId));
+
+  /** Switching network picks that network's first token. */
+  function pickChain(next: string) {
+    chainId = next;
+    asset = assetsOn(next)[0]!;
+    refundTo = '';
+  }
   let refundTo = $state('');
   let tokens = $state<TokenResponse[]>([]);
   let quote = $state<QuoteResult | null>(null);
@@ -51,8 +68,9 @@
       toastError('Connect a wallet first');
       return;
     }
-    if (refundTo.trim().length < 8) {
-      toastError(`Enter a ${asset.chain} address for refunds`);
+    const refundProblem = refundAddressError(asset.blockchain, refundTo);
+    if (refundProblem) {
+      toastError(refundProblem);
       return;
     }
 
@@ -111,10 +129,28 @@
 
 <div class="flex flex-col gap-3">
   {#if !deposit}
+    <!--
+      Network first, then token. Payment is a deposit to an address, so any
+      wallet on the network works; the hint names the usual ones.
+    -->
+    <label class="flex flex-col gap-1">
+      <small class="text-[#00000075]">Pay from</small>
+      <select
+        class="rounded-lg border-2 border-gray-300 px-3 py-2 text-sm text-black outline-none focus:border-[#2d3c53]"
+        value={chainId}
+        onchange={(event) => pickChain((event.currentTarget as HTMLSelectElement).value)}
+      >
+        {#each PAY_CHAINS as option (option.blockchain)}
+          <option value={option.blockchain}>{option.name}</option>
+        {/each}
+      </select>
+      <small class="text-[0.6rem] text-[#00000075]">Works with {chain.wallets}, or any {chain.name} wallet.</small>
+    </label>
+
     <div class="flex flex-col gap-2">
       <small class="text-[#00000075]">Pay with</small>
       <div class="grid grid-cols-4 gap-2">
-        {#each PAY_ASSETS as option (option.assetId)}
+        {#each chainAssets as option (option.assetId)}
           <button
             type="button"
             onclick={() => (asset = option)}
@@ -141,9 +177,13 @@
         autocapitalize="none"
         class="rounded-lg border-2 border-gray-300 px-3 py-2 text-sm text-black outline-none focus:border-[#2d3c53]"
       />
-      <small class="text-[0.6rem] text-[#00000075]">
-        If the swap cannot complete, your {asset.symbol} goes back here.
-      </small>
+      {#if refundTo.trim() && refundAddressError(asset.blockchain, refundTo)}
+        <small class="text-[0.6rem] text-red-700">{refundAddressError(asset.blockchain, refundTo)}</small>
+      {:else}
+        <small class="text-[0.6rem] text-[#00000075]">
+          If the swap cannot complete, your {asset.symbol} goes back here.
+        </small>
+      {/if}
     </label>
 
     <div class="flex flex-row items-center justify-between rounded-lg bg-[#a9c6e4] px-3 py-2">
