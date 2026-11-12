@@ -245,7 +245,10 @@ export async function stakePet(petId: number) {
     STAKE_CONTRACT,
     'stake_pet',
     { pet_id: petId },
-    { gas: GAS.heavy, deposit: '1' }
+    // No deposit: the contract takes none, and a non-payable method rejects
+    // even one yoctoNEAR. Leaving it off is also what lets a function-call
+    // key sign this without sending the player out to a wallet.
+    { gas: GAS.heavy }
   );
 
   const refused = failureLog(outcome, [
@@ -258,7 +261,7 @@ export async function stakePet(petId: number) {
 }
 
 export const unstakePet = (petId: number) =>
-  callFunction(STAKE_CONTRACT, 'unstake_pet', { pet_id: petId }, { gas: GAS.heavy, deposit: '1' });
+  callFunction(STAKE_CONTRACT, 'unstake_pet', { pet_id: petId }, { gas: GAS.heavy });
 
 /** Move `pending_credits` into the spendable `credit_balance`. */
 export const claimCredits = () =>

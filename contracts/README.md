@@ -86,8 +86,8 @@ using the usual accumulator pattern.
 
 | Method | Who | Notes |
 |---|---|---|
-| `stake_pet(pet_id)` | player, 1 yocto | reads owner + attributes from the game contract |
-| `unstake_pet(pet_id)` | player, 1 yocto | accrued credit stays in `pending` |
+| `stake_pet(pet_id)` | player, no deposit | reads owner + attributes from the game contract |
+| `unstake_pet(pet_id)` | player, no deposit | accrued credit stays in `pending` |
 | `sync_pet(pet_id)` | anybody | re-reads attributes after a level-up or evolution |
 | `claim_credits()` | player | `pending` → `credit_balance` |
 | `spend_credits(action, pet_id, amount)` | player | charges the contract's own price; consumes a Focus Lens; emits `credit_spent` |
