@@ -5,63 +5,39 @@ import {
   ONECLICK_JWT,
   ONECLICK_REFERRAL
 } from '$app/env/private';
+import { QUOTE_KEY_TYPES, isQuoteKey, keyType } from '#lib/intents/keys';
 import type { ExecutionStatus, QuoteRequest, QuoteResponse, TokenResponse } from '#lib/intents/types';
 
 const API = `${ONECLICK_BASE_URL.replace(/\/+$/, '')}/v0`;
 
-/**
- * NEAR Intents issues more than one kind of JWT, and they are not
- * interchangeable. A partner key authenticates 1Click quotes; an `explorer`
- * key reads swap history from `explorer.near-intents.org` and does nothing
- * here.
- *
- * The claim is in the token's own payload, so checking it costs nothing and
- * stops the UI from reporting quotes as authenticated when they are not —
- * which is what happens if the wrong key is pasted into `ONECLICK_JWT`.
- */
-function keyType(token: string): string | null {
-  const payload = token.split('.')[1];
-  if (!payload) return null;
-  try {
-    const padded = payload.padEnd(payload.length + ((4 - (payload.length % 4)) % 4), '=');
-    const json = atob(padded.replace(/-/g, '+').replace(/_/g, '/'));
-    return (JSON.parse(json) as { key_type?: string }).key_type ?? null;
-  } catch {
-    return null;
-  }
-}
-
 let warnedAboutKeyType = false;
 
 /**
- * Is a usable 1Click partner key configured?
+ * Is a key that can authenticate 1Click quotes configured?
  *
- * A token of the wrong type counts as no key: quotes still work, they just
- * carry the unauthenticated surcharge, and saying so is better than claiming
- * an authentication that is not happening.
+ * Which key types count is decided in `#lib/intents/keys`. A token of another
+ * type counts as no key, and the server says so once rather than letting the
+ * UI claim an authentication that is not happening.
  */
 export function hasPartnerKey(): boolean {
   if (ONECLICK_JWT.length === 0) return false;
+  if (isQuoteKey(ONECLICK_JWT)) return true;
 
-  const kind = keyType(ONECLICK_JWT);
-  if (kind && kind !== 'partner') {
-    if (!warnedAboutKeyType) {
-      warnedAboutKeyType = true;
-      console.warn(
-        `[joygotchi] ONECLICK_JWT is a "${kind}" key, not a 1Click partner key. ` +
-          'Quotes will carry the 0.25% unauthenticated fee. Get a partner key from ' +
-          'https://partners.near-intents.org/home.'
-      );
-    }
-    return false;
+  if (!warnedAboutKeyType) {
+    warnedAboutKeyType = true;
+    console.warn(
+      `[joygotchi] ONECLICK_JWT is a "${keyType(ONECLICK_JWT)}" key, which 1Click does not ` +
+        `take for quotes (it wants one of: ${QUOTE_KEY_TYPES.join(', ')}). Sending none. ` +
+        'Get one from https://partners.near-intents.org/home.'
+    );
   }
-  return true;
+  return false;
 }
 
 function headers(): HeadersInit {
   const base: Record<string, string> = { 'content-type': 'application/json' };
-  // Only send a key 1Click can actually use. Sending an explorer key here
-  // authenticates nothing and risks being rejected outright.
+  // Only send a key 1Click can actually use. An explorer key here
+  // authenticates nothing.
   if (hasPartnerKey()) base['X-API-Key'] = ONECLICK_JWT;
   return base;
 }
